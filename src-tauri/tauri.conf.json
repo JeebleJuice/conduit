@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Conduit",
+  "version": "0.1.0",
+  "identifier": "dev.jeeblejuice.conduit",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Conduit",
+        "width": 1480,
+        "height": 900,
+        "minWidth": 1080,
+        "minHeight": 680,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["rpm", "appimage"],
+    "category": "Utility",
+    "shortDescription": "Safe, visual desktop automation",
+    "longDescription": "Build, preview, and run understandable local automations on a visual canvas."
+  }
+}
