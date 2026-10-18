@@ -1,13 +1,13 @@
 import { addEdge, Background, BackgroundVariant, Controls, MiniMap, ReactFlow, ReactFlowProvider, useEdgesState, useNodesState, type Connection, type Edge, type NodeMouseHandler } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { ArchiveRestore, Check, ChevronDown, CircleAlert, Clock3, Copy, Download, Ellipsis, FileClock, FolderLock, History, Import, LayoutDashboard, Pause, Play, Plus, Save, Search, Settings, ShieldCheck, Sparkles, Square, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Check, ChevronDown, CircleAlert, Copy, Download, Ellipsis, FileClock, FolderLock, History, LayoutDashboard, Pause, Play, Plus, Save, Search, Settings, ShieldCheck, Sparkles, Square, Upload, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConduitNode } from "./components/ConduitNode";
 import { Inspector } from "./components/Inspector";
 import { NodeLibrary } from "./components/NodeLibrary";
 import { initialWorkflows } from "./data";
-import { executeWorkflow, getRunHistory, loadRuns, loadWorkflows, saveWorkflows, validateWorkflow } from "./lib/engine";
-import type { ConduitNodeData, EngineResult, RunRecord, Workflow, WorkflowNode } from "./types";
+import { executeWorkflow, getRunHistory, getWorkerHealth, getWorkflowStatuses, loadRuns, loadWorkflows, saveWorkflows, setWorkflowEnabled, stopCurrentRun, syncWorkflowDefinitions, validateWorkflow } from "./lib/engine";
+import type { ConduitNodeData, EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowNode, WorkflowRuntimeStatus } from "./types";
 import "./styles.css";
 
 const nodeTypes = { conduit: ConduitNode };
@@ -96,13 +96,70 @@ function App() {
   const [result, setResult] = useState<EngineResult>();
   const [dryRun, setDryRun] = useState(true);
   const [running, setRunning] = useState(false);
+  const [runtime, setRuntime] = useState<Record<string, WorkflowRuntimeStatus>>({});
+  const [health, setHealth] = useState<WorkerHealth>({ running: false, enabledWorkflows: 0, watchedFolders: 0 });
+  const [engineOpen, setEngineOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const active = workflows.find((workflow) => workflow.id === activeId) ?? workflows[0];
 
-  useEffect(() => saveWorkflows(workflows), [workflows]);
+  useEffect(() => {
+    saveWorkflows(workflows);
+    const timer = window.setTimeout(() => {
+      syncWorkflowDefinitions(workflows).then((statuses) => {
+        if (!statuses.length) return;
+        setRuntime(Object.fromEntries(statuses.map((status) => [status.workflowId, status])));
+        setWorkflows((current) => {
+          let changed = false;
+          const next = current.map((workflow) => {
+            const status = statuses.find((item) => item.workflowId === workflow.id);
+            if (status && workflow.enabled !== status.enabled) {
+              changed = true;
+              return { ...workflow, enabled: status.enabled };
+            }
+            return workflow;
+          });
+          return changed ? next : current;
+        });
+      }).catch(() => undefined);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [workflows]);
   useEffect(() => { getRunHistory().then(setRuns); }, [view]);
+  const refreshRuntime = useCallback(async () => {
+    const [statuses, worker] = await Promise.all([getWorkflowStatuses(), getWorkerHealth()]);
+    if (statuses.length) {
+      setRuntime(Object.fromEntries(statuses.map((status) => [status.workflowId, status])));
+      setWorkflows((current) => {
+        let changed = false;
+        const next = current.map((workflow) => {
+          const status = statuses.find((item) => item.workflowId === workflow.id);
+          if (status && workflow.enabled !== status.enabled) {
+            changed = true;
+            return { ...workflow, enabled: status.enabled };
+          }
+          return workflow;
+        });
+        return changed ? next : current;
+      });
+    }
+    setHealth(worker);
+  }, []);
+  useEffect(() => {
+    refreshRuntime().catch(() => undefined);
+    const timer = window.setInterval(() => refreshRuntime().catch(() => undefined), 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshRuntime]);
   const updateWorkflow = useCallback((next: Workflow) => setWorkflows((all) => all.map((item) => item.id === next.id ? next : item)), []);
-  const toggle = (id: string) => setWorkflows((all) => all.map((item) => item.id === id ? { ...item, enabled: !item.enabled } : item));
+  const toggle = async (workflow: Workflow) => {
+    try {
+      const status = await setWorkflowEnabled(workflow, !workflow.enabled);
+      setRuntime((current) => ({ ...current, [workflow.id]: status }));
+      setWorkflows((all) => all.map((item) => item.id === workflow.id ? { ...item, enabled: status.enabled } : item));
+      await refreshRuntime();
+    } catch (error) {
+      alert(String(error));
+    }
+  };
   const createWorkflow = () => {
     const workflow: Workflow = { id: crypto.randomUUID(), name: "Untitled workflow", description: "A new local automation", enabled: false, updatedAt: new Date().toISOString(), permissions: [], nodes: [{ id: "manual-trigger", type: "conduit", position: { x: 120, y: 180 }, data: { kind: "trigger", nodeType: "manual", label: "Manual run", description: "Start from the toolbar", config: {} } }], edges: [] };
     setWorkflows((all) => [...all, workflow]); setActiveId(workflow.id); setView("builder");
@@ -114,23 +171,23 @@ function App() {
     const issues = validateWorkflow(active); if (issues.length) return alert(issues.join("\n"));
     setRunning(true); setDryRun(preview);
     setWorkflows((all) => all.map((item) => item.id === active.id ? { ...item, nodes: item.nodes.map((node) => ({ ...node, data: { ...node.data, status: "running" } })) } : item));
-    try { const runResult = await executeWorkflow(active, preview); setResult(runResult); setRuns(await getRunHistory()); setWorkflows((all) => all.map((item) => item.id === active.id ? { ...item, nodes: item.nodes.map((node) => ({ ...node, data: { ...node.data, status: runResult.nodeStatuses[node.id] ?? "idle" } })) } : item)); }
-    catch (error) { alert(String(error)); }
+    try { const runResult = await executeWorkflow(active, preview); setResult(runResult); setRuns(await getRunHistory()); await refreshRuntime(); setWorkflows((all) => all.map((item) => item.id === active.id ? { ...item, nodes: item.nodes.map((node) => ({ ...node, data: { ...node.data, status: runResult.nodeStatuses[node.id] ?? "idle" } })) } : item)); }
+    catch (error) { if (!String(error).includes("Run stopped by user")) alert(String(error)); setRuns(await getRunHistory()); }
     finally { setRunning(false); }
   };
 
   return <div className="app-shell">
-    <header className="topbar"><div className="brand"><span className="logo-mark"><i /><i /><i /></span><strong>CONDUIT</strong><small>LOCAL AUTOMATION</small></div><nav><button className={view === "builder" ? "active" : ""} onClick={() => setView("builder")}><LayoutDashboard size={15} /> Builder</button><button className={view === "history" ? "active" : ""} onClick={() => setView("history")}><History size={15} /> History</button></nav><div className="top-actions"><span className="local-status"><i /> Local only</span><button><Settings size={17} /></button></div></header>
+    <header className="topbar"><div className="brand"><span className="logo-mark"><i /><i /><i /></span><strong>CONDUIT</strong><small>LOCAL AUTOMATION</small></div><nav><button className={view === "builder" ? "active" : ""} onClick={() => setView("builder")}><LayoutDashboard size={15} /> Builder</button><button className={view === "history" ? "active" : ""} onClick={() => setView("history")}><History size={15} /> History</button></nav><div className="top-actions"><button className={`engine-status ${health.running ? "online" : ""}`} onClick={() => setEngineOpen((open) => !open)}><i /> {health.running ? `${health.enabledWorkflows} active` : "Local only"}</button><button><Settings size={17} /></button>{engineOpen && <div className="engine-popover"><div><Activity size={16} /><span><strong>Background engine</strong><small>{health.running ? "Running in the system tray" : "Available in the desktop app"}</small></span></div><dl><div><dt>Enabled workflows</dt><dd>{health.enabledWorkflows}</dd></div><div><dt>Watched folders</dt><dd>{health.watchedFolders}</dd></div><div><dt>Last reconciliation</dt><dd>{health.lastReconcileAt ? new Date(health.lastReconcileAt).toLocaleTimeString() : "Pending"}</dd></div></dl>{health.lastError && <p>{health.lastError}</p>}</div>}</div></header>
     <div className="workspace-row">
       <aside className="workflow-rail"><div className="rail-heading"><span>Workflows</span><button onClick={createWorkflow}><Plus size={16} /></button></div><label className="rail-search"><Search size={13} /><input placeholder="Find workflow" /></label>
-        <div className="workflow-list">{workflows.map((workflow) => <button key={workflow.id} onClick={() => { setActiveId(workflow.id); setView("builder"); }} className={workflow.id === activeId && view === "builder" ? "active" : ""}><span className="workflow-glyph"><i /><i /><i /></span><span><strong>{workflow.name}</strong><small>{workflow.nodes.length} nodes · {workflow.enabled ? "Watching" : "Paused"}</small></span><i className={`enabled-dot ${workflow.enabled ? "on" : ""}`} /></button>)}</div>
+        <div className="workflow-list">{workflows.map((workflow) => { const status = runtime[workflow.id]; return <button key={workflow.id} onClick={() => { setActiveId(workflow.id); setView("builder"); }} className={workflow.id === activeId && view === "builder" ? "active" : ""}><span className="workflow-glyph"><i /><i /><i /></span><span><strong>{workflow.name}</strong><small>{workflow.nodes.length} nodes · {status?.state === "needs_preview" ? "Needs preview" : status?.state ?? (workflow.enabled ? "Active" : "Paused")}</small></span><i className={`enabled-dot ${workflow.enabled ? "on" : ""}`} /></button>; })}</div>
         <div className="rail-footer"><button onClick={() => fileInput.current?.click()}><Upload size={14} /> Import</button><input ref={fileInput} type="file" accept="application/json,.json" hidden onChange={(event) => importWorkflow(event.target.files?.[0])} /><button onClick={exportWorkflow}><Download size={14} /> Export</button></div>
       </aside>
       <section className="content-column">
-        {view === "builder" ? <><div className="workflow-header"><div className="workflow-title"><button className={`toggle ${active.enabled ? "on" : ""}`} onClick={() => toggle(active.id)} aria-label="Toggle workflow"><span /></button><div><div><input value={active.name} onChange={(e) => updateWorkflow({ ...active, name: e.target.value })} /><ChevronDown size={15} /></div><p>{active.enabled ? "Enabled and watching for changes" : "Paused — manual runs are still available"}</p></div></div><div className="header-actions"><span className="saved"><Save size={13} /> Saved locally</span><button onClick={duplicate}><Copy size={15} /> Duplicate</button><button onClick={() => { const path = window.prompt("Allow this workflow to access a folder", "~/"); if (path?.trim() && !active.permissions.includes(path.trim())) updateWorkflow({ ...active, permissions: [...active.permissions, path.trim()] }); }}><FolderLock size={15} /> Permissions</button><button><Ellipsis size={17} /></button></div></div><Builder key={active.id} workflow={active} onUpdate={updateWorkflow} onRun={run} /></> : <HistoryView runs={runs} />}
+        {view === "builder" ? <><div className="workflow-header"><div className="workflow-title"><button className={`toggle ${active.enabled ? "on" : ""}`} onClick={() => toggle(active)} aria-label="Toggle workflow"><span /></button><div><div><input value={active.name} onChange={(e) => updateWorkflow({ ...active, name: e.target.value })} /><ChevronDown size={15} /></div><p>{runtime[active.id]?.message ?? (active.enabled ? "Enabled for background execution" : "Paused — manual runs are still available")}</p></div></div><div className="header-actions"><span className="saved"><Save size={13} /> Saved locally</span><button onClick={duplicate}><Copy size={15} /> Duplicate</button><button onClick={() => { const path = window.prompt("Allow this workflow to access a folder", "~/"); if (path?.trim() && !active.permissions.includes(path.trim())) updateWorkflow({ ...active, permissions: [...active.permissions, path.trim()] }); }}><FolderLock size={15} /> Permissions</button><button><Ellipsis size={17} /></button></div></div><Builder key={active.id} workflow={active} onUpdate={updateWorkflow} onRun={run} /></> : <HistoryView runs={runs} />}
       </section>
     </div>
-    {running && <div className="running-bar"><span /><Pause size={15} /> Inspecting workflow safely… <button><Square size={12} fill="currentColor" /> Stop</button></div>}
+    {running && <div className="running-bar"><span /><Pause size={15} /> Inspecting workflow safely… <button onClick={() => stopCurrentRun()}><Square size={12} fill="currentColor" /> Stop</button></div>}
     {result && <RunDialog result={result} dryRun={dryRun} onClose={() => setResult(undefined)} />}
   </div>;
 }

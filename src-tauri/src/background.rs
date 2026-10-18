@@ -1,0 +1,361 @@
+use crate::{
+    database,
+    engine::{self, expand_home, number_config, string_config, trigger_node},
+    models::{WorkerHealth, Workflow},
+};
+use chrono::{Datelike, Local, Timelike, Utc};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+
+pub(crate) fn spawn(
+    db_path: PathBuf,
+    health: Arc<Mutex<WorkerHealth>>,
+    shutdown: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+    execution_lock: Arc<Mutex<()>>,
+) {
+    thread::Builder::new()
+        .name("conduit-background-engine".into())
+        .spawn(move || run_loop(&db_path, &health, &shutdown, &cancelled, &execution_lock))
+        .expect("failed to start the Conduit background engine");
+}
+
+fn run_loop(
+    db_path: &Path,
+    health: &Arc<Mutex<WorkerHealth>>,
+    shutdown: &Arc<AtomicBool>,
+    cancelled: &Arc<AtomicBool>,
+    execution_lock: &Arc<Mutex<()>>,
+) {
+    if let Ok(mut value) = health.lock() {
+        value.running = true;
+    }
+    let (event_tx, event_rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |event| {
+        let _ = event_tx.send(event);
+    })
+    .ok();
+    let mut watched = HashSet::new();
+    let mut workflows = Vec::new();
+    let mut startup_fired = HashSet::new();
+    let mut schedule_fired: HashMap<String, String> = HashMap::new();
+    let mut fingerprints: HashMap<String, u64> = HashMap::new();
+    let mut last_refresh = Instant::now() - Duration::from_secs(30);
+    let mut last_reconcile = Instant::now();
+    let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+
+    while !shutdown.load(Ordering::Relaxed) {
+        if last_refresh.elapsed() >= Duration::from_secs(5) {
+            match database::load_enabled(db_path) {
+                Ok(current) => {
+                    workflows = current;
+                    refresh_watches(&workflows, watcher.as_mut(), &mut watched);
+                    if let Ok(mut value) = health.lock() {
+                        value.enabled_workflows = workflows.len();
+                        value.watched_folders = watched.len();
+                        value.last_error = None;
+                    }
+                    for workflow in &workflows {
+                        if trigger_node(workflow).is_some_and(|node| node.data.node_type == "startup")
+                            && startup_fired.insert(workflow.id.clone())
+                        {
+                            run_with_retries(db_path, workflow, "startup", None, cancelled, execution_lock);
+                        }
+                    }
+                }
+                Err(error) => set_error(health, error),
+            }
+            last_refresh = Instant::now();
+        }
+
+        for workflow in &workflows {
+            if schedule_is_due(workflow, &mut schedule_fired) {
+                run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock);
+            }
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Ok(event)) => {
+                for workflow in &workflows {
+                    let Some(folder) = watched_folder(workflow) else { continue };
+                    let matching: Vec<PathBuf> = event
+                        .paths
+                        .iter()
+                        .filter(|path| path.starts_with(&folder))
+                        .cloned()
+                        .collect();
+                    if matching.is_empty() || recently_ran(&mut cooldowns, &workflow.id) {
+                        continue;
+                    }
+                    run_with_retries(db_path, workflow, "folder change", Some(&matching), cancelled, execution_lock);
+                }
+            }
+            Ok(Err(error)) => set_error(health, format!("Filesystem watcher: {error}")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                set_error(health, "Filesystem watcher stopped unexpectedly".into());
+                watcher = None;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        if last_reconcile.elapsed() >= Duration::from_secs(60) {
+            for workflow in &workflows {
+                let Some(folder) = watched_folder(workflow) else { continue };
+                let current = folder_fingerprint(&folder);
+                if let Some(previous) = fingerprints.insert(workflow.id.clone(), current) {
+                    if previous != current && !recently_ran(&mut cooldowns, &workflow.id) {
+                        run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock);
+                    }
+                }
+            }
+            if let Ok(mut value) = health.lock() {
+                value.last_reconcile_at = Some(Utc::now().to_rfc3339());
+            }
+            last_reconcile = Instant::now();
+        }
+    }
+    if let Ok(mut value) = health.lock() {
+        value.running = false;
+    }
+}
+
+fn refresh_watches(
+    workflows: &[Workflow],
+    watcher: Option<&mut RecommendedWatcher>,
+    watched: &mut HashSet<PathBuf>,
+) {
+    let desired: HashSet<PathBuf> = workflows.iter().filter_map(watched_folder).collect();
+    let Some(watcher) = watcher else { return };
+    for removed in watched.difference(&desired) {
+        let _ = watcher.unwatch(removed);
+    }
+    for added in desired.difference(watched) {
+        if added.is_dir() {
+            let _ = watcher.watch(added, RecursiveMode::NonRecursive);
+        }
+    }
+    *watched = desired;
+}
+
+fn watched_folder(workflow: &Workflow) -> Option<PathBuf> {
+    trigger_node(workflow)
+        .filter(|node| node.data.node_type == "folder_changed")
+        .and_then(|node| string_config(node, "path"))
+        .and_then(|path| expand_home(&path).ok())
+        .and_then(|path| path.canonicalize().ok())
+}
+
+fn recently_ran(cooldowns: &mut HashMap<String, Instant>, workflow_id: &str) -> bool {
+    let now = Instant::now();
+    let recent = cooldowns
+        .get(workflow_id)
+        .is_some_and(|previous| now.duration_since(*previous) < Duration::from_secs(2));
+    if !recent {
+        cooldowns.insert(workflow_id.to_owned(), now);
+    }
+    recent
+}
+
+fn schedule_is_due(workflow: &Workflow, fired: &mut HashMap<String, String>) -> bool {
+    let Some(trigger) = trigger_node(workflow).filter(|node| node.data.node_type == "schedule") else {
+        return false;
+    };
+    let now = Local::now();
+    let minute_key = now.format("%Y-%m-%dT%H:%M").to_string();
+    if fired.get(&workflow.id) == Some(&minute_key) {
+        return false;
+    }
+    let due = if let Some(interval) = number_config(trigger, "intervalMinutes") {
+        let minute = now.timestamp().div_euclid(60);
+        interval >= 1.0 && minute % interval.round() as i64 == 0
+    } else {
+        string_config(trigger, "schedule")
+            .is_some_and(|schedule| cron_matches(&schedule, &now))
+    };
+    if due {
+        fired.insert(workflow.id.clone(), minute_key);
+    }
+    due
+}
+
+fn cron_matches(expression: &str, now: &chrono::DateTime<Local>) -> bool {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    if fields.len() != 5 {
+        return false;
+    }
+    field_matches(fields[0], now.minute())
+        && field_matches(fields[1], now.hour())
+        && field_matches(fields[2], now.day())
+        && field_matches(fields[3], now.month())
+        && field_matches(fields[4], now.weekday().num_days_from_sunday())
+}
+
+fn field_matches(field: &str, value: u32) -> bool {
+    field == "*"
+        || field
+            .split(',')
+            .filter_map(|part| part.parse::<u32>().ok())
+            .any(|candidate| candidate == value)
+}
+
+fn folder_fingerprint(folder: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(folder) else { return 0 };
+    entries.filter_map(Result::ok).fold(0_u64, |fingerprint, entry| {
+        let Ok(metadata) = entry.metadata() else { return fingerprint };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+        fingerprint.wrapping_add(metadata.len()).rotate_left(7) ^ modified
+    })
+}
+
+fn retry_count(workflow: &Workflow) -> usize {
+    workflow
+        .nodes
+        .iter()
+        .filter_map(|node| node.data.config.get("retryCount").and_then(serde_json::Value::as_u64))
+        .max()
+        .unwrap_or(1)
+        .clamp(1, 3) as usize
+}
+
+fn run_with_retries(
+    db_path: &Path,
+    workflow: &Workflow,
+    trigger: &str,
+    event_paths: Option<&[PathBuf]>,
+    cancelled: &AtomicBool,
+    execution_lock: &Mutex<()>,
+) {
+    let Ok(_guard) = execution_lock.lock() else { return };
+    cancelled.store(false, Ordering::Relaxed);
+    let attempts = retry_count(workflow);
+    let mut final_error = None;
+    for attempt in 0..attempts {
+        match engine::execute(workflow, false, db_path, trigger, event_paths, true, cancelled) {
+            Ok(_) => return,
+            Err(error) => {
+                if error == "Run stopped by user" {
+                    return;
+                }
+                final_error = Some(error);
+                if attempt + 1 < attempts {
+                    thread::sleep(Duration::from_millis(250 * 2_u64.pow(attempt as u32)));
+                }
+            }
+        }
+    }
+    if let Some(error) = final_error {
+        let _ = database::record_failure(db_path, workflow, trigger, &error);
+    }
+}
+
+fn set_error(health: &Arc<Mutex<WorkerHealth>>, error: String) {
+    if let Ok(mut value) = health.lock() {
+        value.last_error = Some(error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{NodeData, WorkflowEdge, WorkflowNode};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn five_field_schedule_matches() {
+        let now = Local::now();
+        let expression = format!("{} {} * * {}", now.minute(), now.hour(), now.weekday().num_days_from_sunday());
+        assert!(cron_matches(&expression, &now));
+        assert!(!cron_matches("99 99 * * *", &now));
+    }
+
+    #[test]
+    fn native_folder_event_runs_an_enabled_workflow() {
+        let directory = std::env::temp_dir().join(format!("conduit-watch-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("conduit.sqlite3");
+        database::initialize(&database_path).unwrap();
+        let workflow = Workflow {
+            id: "watch-test".into(),
+            name: "Watch test".into(),
+            enabled: false,
+            permissions: vec![directory.display().to_string()],
+            nodes: vec![
+                WorkflowNode {
+                    id: "trigger".into(),
+                    data: NodeData {
+                        label: "Folder changed".into(),
+                        kind: "trigger".into(),
+                        node_type: "folder_changed".into(),
+                        config: HashMap::from([(
+                            "path".into(),
+                            serde_json::Value::String(directory.display().to_string()),
+                        )]),
+                    },
+                },
+                WorkflowNode {
+                    id: "condition".into(),
+                    data: NodeData {
+                        label: "Text files".into(),
+                        kind: "condition".into(),
+                        node_type: "extension".into(),
+                        config: HashMap::from([(
+                            "extension".into(),
+                            serde_json::Value::String(".txt".into()),
+                        )]),
+                    },
+                },
+                WorkflowNode {
+                    id: "action".into(),
+                    data: NodeData {
+                        label: "Checksum".into(),
+                        kind: "action".into(),
+                        node_type: "checksum".into(),
+                        config: HashMap::new(),
+                    },
+                },
+            ],
+            edges: vec![
+                WorkflowEdge { source: "trigger".into(), target: "condition".into() },
+                WorkflowEdge { source: "condition".into(), target: "action".into() },
+            ],
+        };
+        database::approve_preview(&database_path, &workflow).unwrap();
+        database::set_enabled(&database_path, &workflow, true).unwrap();
+
+        let health = Arc::new(Mutex::new(WorkerHealth::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let execution_lock = Arc::new(Mutex::new(()));
+        spawn(database_path.clone(), health, shutdown.clone(), cancelled, execution_lock);
+        thread::sleep(Duration::from_secs(1));
+        let source = directory.join("sample.txt");
+        std::fs::write(&source, b"background engine").unwrap();
+
+        let sidecar = directory.join("sample.txt.sha256");
+        for _ in 0..40 {
+            if sidecar.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        shutdown.store(true, Ordering::Relaxed);
+        assert!(sidecar.exists(), "the native folder event did not run the workflow");
+        assert!(database::list_runs(&database_path).unwrap().iter().any(|run| run.status == "success"));
+        thread::sleep(Duration::from_millis(600));
+        let _ = std::fs::remove_dir_all(directory);
+    }
+}

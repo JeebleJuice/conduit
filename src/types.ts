@@ -50,3 +50,19 @@ export type EngineResult = {
   operations: PreviewOperation[];
   nodeStatuses: Record<string, ConduitNodeData["status"]>;
 };
+
+export type WorkflowRuntimeStatus = {
+  workflowId: string;
+  enabled: boolean;
+  state: "watching" | "scheduled" | "armed" | "ready" | "paused" | "needs_preview" | "error";
+  message: string;
+  lastRunAt?: string;
+};
+
+export type WorkerHealth = {
+  running: boolean;
+  enabledWorkflows: number;
+  watchedFolders: number;
+  lastReconcileAt?: string;
+  lastError?: string;
+};

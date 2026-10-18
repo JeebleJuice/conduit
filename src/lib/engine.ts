@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { EngineResult, RunRecord, Workflow } from "../types";
+import type { EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus } from "../types";
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
@@ -72,6 +72,44 @@ export async function executeWorkflow(workflow: Workflow, dryRun: boolean): Prom
     : simulate(workflow, dryRun);
   saveRun(result.run);
   return result;
+}
+
+export async function syncWorkflowDefinitions(workflows: Workflow[]): Promise<WorkflowRuntimeStatus[]> {
+  if (!isTauri()) {
+    return workflows.map((workflow) => ({
+      workflowId: workflow.id,
+      enabled: workflow.enabled,
+      state: workflow.enabled ? "watching" : "paused",
+      message: workflow.enabled ? "Browser simulation is active" : "Background execution is paused",
+    }));
+  }
+  return invoke<WorkflowRuntimeStatus[]>("sync_workflows", { workflows });
+}
+
+export async function setWorkflowEnabled(workflow: Workflow, enabled: boolean): Promise<WorkflowRuntimeStatus> {
+  if (!isTauri()) {
+    return {
+      workflowId: workflow.id,
+      enabled,
+      state: enabled ? "watching" : "paused",
+      message: enabled ? "Browser simulation is active" : "Background execution is paused",
+    };
+  }
+  return invoke<WorkflowRuntimeStatus>("set_workflow_enabled", { workflow, enabled });
+}
+
+export async function getWorkflowStatuses(): Promise<WorkflowRuntimeStatus[]> {
+  if (!isTauri()) return [];
+  return invoke<WorkflowRuntimeStatus[]>("workflow_statuses");
+}
+
+export async function getWorkerHealth(): Promise<WorkerHealth> {
+  if (!isTauri()) return { running: false, enabledWorkflows: 0, watchedFolders: 0 };
+  return invoke<WorkerHealth>("worker_health");
+}
+
+export async function stopCurrentRun(): Promise<void> {
+  if (isTauri()) await invoke("stop_current_run");
 }
 
 export function validateWorkflow(workflow: Workflow): string[] {

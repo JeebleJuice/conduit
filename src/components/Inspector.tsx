@@ -3,14 +3,14 @@ import type { WorkflowNode } from "../types";
 
 const fieldMap: Record<string, { key: string; label: string; placeholder: string; type?: string }[]> = {
   folder_changed: [{ key: "path", label: "Folder", placeholder: "~/Downloads" }],
-  schedule: [{ key: "schedule", label: "Cron schedule", placeholder: "0 17 * * 5" }],
+  schedule: [{ key: "schedule", label: "Cron schedule", placeholder: "0 17 * * 5" }, { key: "retryCount", label: "Maximum attempts", placeholder: "1", type: "number" }],
   extension: [{ key: "extension", label: "Extension", placeholder: ".pdf" }],
   file_size: [{ key: "maxMb", label: "Maximum MB", placeholder: "25", type: "number" }],
   age: [{ key: "hours", label: "Older than (hours)", placeholder: "24", type: "number" }],
   exists: [{ key: "path", label: "Path", placeholder: "~/Documents/file.pdf" }],
   create_directory: [{ key: "destination", label: "Directory", placeholder: "~/Documents/Archive" }],
   copy: [{ key: "source", label: "Source", placeholder: "~/Downloads/report.pdf" }, { key: "destination", label: "Destination folder", placeholder: "~/Documents" }],
-  move: [{ key: "source", label: "Source (optional)", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Documents" }, { key: "maxFiles", label: "Maximum files", placeholder: "50", type: "number" }],
+  move: [{ key: "source", label: "Source (optional)", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Documents" }, { key: "maxFiles", label: "Maximum files", placeholder: "50", type: "number" }, { key: "retryCount", label: "Maximum attempts", placeholder: "1", type: "number" }],
   rename: [{ key: "source", label: "Source", placeholder: "From previous node" }, { key: "template", label: "Name template", placeholder: "{date}-{name}" }],
   write_text: [{ key: "destination", label: "File", placeholder: "~/Notes/{date}.md" }, { key: "content", label: "Template", placeholder: "# Weekly note" }],
   checksum: [{ key: "source", label: "File", placeholder: "From previous node" }],
