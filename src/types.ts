@@ -54,7 +54,7 @@ export type EngineResult = {
 export type WorkflowRuntimeStatus = {
   workflowId: string;
   enabled: boolean;
-  state: "watching" | "scheduled" | "armed" | "ready" | "paused" | "needs_preview" | "error";
+  state: "watching" | "scheduled" | "armed" | "listening" | "ready" | "paused" | "needs_preview" | "error";
   message: string;
   lastRunAt?: string;
 };
@@ -65,4 +65,11 @@ export type WorkerHealth = {
   watchedFolders: number;
   lastReconcileAt?: string;
   lastError?: string;
+};
+
+export type CapabilityStatus = {
+  id: string;
+  label: string;
+  available: boolean;
+  detail: string;
 };

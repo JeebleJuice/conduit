@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus } from "../types";
+import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus } from "../types";
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
@@ -60,7 +60,7 @@ function simulate(workflow: Workflow, dryRun: boolean): EngineResult {
     durationMs: 420 + operations.length * 80,
     status: dryRun ? "preview" : "success",
     files: dryRun ? Math.max(operations.length, 1) : 0,
-    reversible: operations.every((item) => item.action !== "notification"),
+    reversible: !dryRun && operations.every((item) => item.action !== "notification"),
     message: dryRun ? `${operations.length} action${operations.length === 1 ? "" : "s"} checked safely` : "Simulation complete — use the desktop build for filesystem execution",
   };
   return { run, operations, nodeStatuses: Object.fromEntries(workflow.nodes.map((node) => [node.id, "success"])) };
@@ -110,6 +110,26 @@ export async function getWorkerHealth(): Promise<WorkerHealth> {
 
 export async function stopCurrentRun(): Promise<void> {
   if (isTauri()) await invoke("stop_current_run");
+}
+
+export async function getCapabilityStatuses(): Promise<CapabilityStatus[]> {
+  if (!isTauri()) return [];
+  return invoke<CapabilityStatus[]>("capability_statuses");
+}
+
+export async function storeSecret(name: string, secret: string): Promise<void> {
+  if (!isTauri()) throw new Error("Secrets are only available in the desktop app");
+  await invoke("store_secret", { name, secret });
+}
+
+export async function removeSecret(name: string): Promise<void> {
+  if (!isTauri()) throw new Error("Secrets are only available in the desktop app");
+  await invoke("remove_secret", { name });
+}
+
+export async function undoRun(runId: string): Promise<number> {
+  if (!isTauri()) return 0;
+  return invoke<number>("undo_run", { runId });
 }
 
 export function validateWorkflow(workflow: Workflow): string[] {

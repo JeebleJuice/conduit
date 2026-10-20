@@ -1,0 +1,17 @@
+{
+  "id": "template-local-webhook-note",
+  "name": "Local webhook inbox",
+  "description": "Accept a loopback POST request and append its body to a dated note.",
+  "enabled": false,
+  "updatedAt": "2026-10-18T00:00:00Z",
+  "permissions": ["~/Documents/Inbox"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":100,"y":170},"data":{"kind":"trigger","nodeType":"webhook","label":"POST /conduit","description":"Loopback port 43821","config":{"port":43821,"path":"/conduit"}}},
+    {"id":"write","type":"conduit","position":{"x":430,"y":170},"data":{"kind":"action","nodeType":"write_text","label":"Save request body","description":"Write a collision-safe note","config":{"destination":"~/Documents/Inbox/{date}-webhook.md","content":"# Webhook — {date}\n\n{input}\n"}}},
+    {"id":"notify","type":"conduit","position":{"x":760,"y":170},"data":{"kind":"action","nodeType":"notification","label":"Webhook received","description":"Show confirmation","config":{"message":"Webhook content saved"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"write"},
+    {"id":"e2","source":"write","target":"notify"}
+  ]
+}

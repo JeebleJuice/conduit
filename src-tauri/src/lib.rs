@@ -1,9 +1,10 @@
+mod actions;
 mod background;
 mod database;
 mod engine;
 mod models;
 
-use models::{EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus};
+use models::{CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus};
 use std::{
     fs,
     path::PathBuf,
@@ -15,8 +16,9 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State, WindowEvent,
+    AppHandle, Manager, State, WindowEvent,
 };
+use tauri_plugin_notification::NotificationExt;
 
 struct AppState {
     db_path: PathBuf,
@@ -31,11 +33,16 @@ fn execute_workflow(
     workflow: Workflow,
     dry_run: bool,
     state: State<AppState>,
+    app: AppHandle,
 ) -> Result<EngineResult, String> {
     let _guard = state.execution_lock.lock().map_err(|_| "Execution lock is unavailable")?;
     state.cancelled.store(false, Ordering::Relaxed);
     database::sync_workflow(&state.db_path, &workflow)?;
-    engine::execute(&workflow, dry_run, &state.db_path, "manual", None, false, &state.cancelled)
+    let result = engine::execute(&workflow, dry_run, &state.db_path, "manual", None, false, &state.cancelled, None)?;
+    if !dry_run {
+        send_notifications(&app, &result);
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -84,9 +91,41 @@ fn list_run_history(state: State<AppState>) -> Result<Vec<RunRecord>, String> {
     database::list_runs(&state.db_path)
 }
 
+#[tauri::command]
+fn capability_statuses() -> Vec<CapabilityStatus> {
+    actions::capability_statuses()
+}
+
+#[tauri::command]
+fn store_secret(name: String, secret: String) -> Result<(), String> {
+    if name.trim().is_empty() || secret.is_empty() {
+        return Err("Secret name and value are required".into());
+    }
+    actions::set_secret(name.trim(), &secret)
+}
+
+#[tauri::command]
+fn remove_secret(name: String) -> Result<(), String> {
+    actions::delete_secret(name.trim())
+}
+
+#[tauri::command]
+fn undo_run(run_id: String, state: State<AppState>) -> Result<usize, String> {
+    let _guard = state.execution_lock.lock().map_err(|_| "Execution lock is unavailable")?;
+    actions::undo_run(&state.db_path, &run_id)
+}
+
+pub(crate) fn send_notifications(app: &AppHandle, result: &EngineResult) {
+    for operation in result.operations.iter().filter(|operation| operation.action == "notification") {
+        let body = operation.destination.as_deref().unwrap_or("Workflow complete");
+        let _ = app.notification().builder().title(&result.run.workflow_name).body(body).show();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&data_dir)?;
@@ -97,7 +136,7 @@ pub fn run() {
             let shutdown = Arc::new(AtomicBool::new(false));
             let cancelled = Arc::new(AtomicBool::new(false));
             let execution_lock = Arc::new(Mutex::new(()));
-            background::spawn(db_path.clone(), health.clone(), shutdown.clone(), cancelled.clone(), execution_lock.clone());
+            background::spawn(db_path.clone(), health.clone(), shutdown.clone(), cancelled.clone(), execution_lock.clone(), Some(app.handle().clone()));
             app.manage(AppState { db_path, health, shutdown, cancelled, execution_lock });
 
             let show = MenuItem::with_id(app, "show", "Show Conduit", true, None::<&str>)?;
@@ -137,6 +176,10 @@ pub fn run() {
             worker_health,
             stop_current_run,
             list_run_history
+            ,capability_statuses
+            ,store_secret
+            ,remove_secret
+            ,undo_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running Conduit");

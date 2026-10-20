@@ -95,3 +95,20 @@ pub(crate) struct WorkerHealth {
     pub last_reconcile_at: Option<String>,
     pub last_error: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CapabilityStatus {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReversibleOperation {
+    pub sequence: i64,
+    pub action: String,
+    pub source: Option<String>,
+    pub destination: Option<String>,
+}

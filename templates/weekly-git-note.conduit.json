@@ -1,0 +1,19 @@
+{
+  "id": "template-weekly-git-note",
+  "name": "Weekly Git note",
+  "description": "Summarise a repository every Friday and save the report to Obsidian.",
+  "enabled": false,
+  "updatedAt": "2026-10-18T00:00:00Z",
+  "permissions": ["~/Dev", "~/Documents/Obsidian Notes"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":170},"data":{"kind":"trigger","nodeType":"schedule","label":"Friday at 17:00","description":"Weekly local schedule","config":{"schedule":"0 17 * * 5","retryCount":2}}},
+    {"id":"git","type":"conduit","position":{"x":370,"y":170},"data":{"kind":"action","nodeType":"git_summary","label":"Collect commits","description":"Last seven days","config":{"repository":"~/Dev/project","sinceDays":7}}},
+    {"id":"write","type":"conduit","position":{"x":660,"y":170},"data":{"kind":"action","nodeType":"write_text","label":"Write Obsidian note","description":"Create a Markdown summary","config":{"destination":"~/Documents/Obsidian Notes/Weekly/{date}.md","content":"# Development week — {date}\n\n{input}\n"}}},
+    {"id":"notify","type":"conduit","position":{"x":950,"y":170},"data":{"kind":"action","nodeType":"notification","label":"Note is ready","description":"Show a desktop notification","config":{"message":"Weekly development note created"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"git"},
+    {"id":"e2","source":"git","target":"write"},
+    {"id":"e3","source":"write","target":"notify"}
+  ]
+}

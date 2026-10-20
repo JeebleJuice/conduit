@@ -5,8 +5,11 @@ use crate::{
 };
 use chrono::{Datelike, Local, Timelike, Utc};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use tauri::AppHandle;
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -22,10 +25,11 @@ pub(crate) fn spawn(
     shutdown: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
     execution_lock: Arc<Mutex<()>>,
+    app: Option<AppHandle>,
 ) {
     thread::Builder::new()
         .name("conduit-background-engine".into())
-        .spawn(move || run_loop(&db_path, &health, &shutdown, &cancelled, &execution_lock))
+        .spawn(move || run_loop(&db_path, &health, &shutdown, &cancelled, &execution_lock, &app))
         .expect("failed to start the Conduit background engine");
 }
 
@@ -35,6 +39,7 @@ fn run_loop(
     shutdown: &Arc<AtomicBool>,
     cancelled: &Arc<AtomicBool>,
     execution_lock: &Arc<Mutex<()>>,
+    app: &Option<AppHandle>,
 ) {
     if let Ok(mut value) = health.lock() {
         value.running = true;
@@ -52,6 +57,9 @@ fn run_loop(
     let mut last_refresh = Instant::now() - Duration::from_secs(30);
     let mut last_reconcile = Instant::now();
     let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+    let mut webhooks: HashMap<String, TcpListener> = HashMap::new();
+    let mut mounted = mount_points();
+    let mut last_mount_check = Instant::now();
 
     while !shutdown.load(Ordering::Relaxed) {
         if last_refresh.elapsed() >= Duration::from_secs(5) {
@@ -59,6 +67,7 @@ fn run_loop(
                 Ok(current) => {
                     workflows = current;
                     refresh_watches(&workflows, watcher.as_mut(), &mut watched);
+                    refresh_webhooks(&workflows, &mut webhooks);
                     if let Ok(mut value) = health.lock() {
                         value.enabled_workflows = workflows.len();
                         value.watched_folders = watched.len();
@@ -68,7 +77,7 @@ fn run_loop(
                         if trigger_node(workflow).is_some_and(|node| node.data.node_type == "startup")
                             && startup_fired.insert(workflow.id.clone())
                         {
-                            run_with_retries(db_path, workflow, "startup", None, cancelled, execution_lock);
+                            run_with_retries(db_path, workflow, "startup", None, cancelled, execution_lock, app, None);
                         }
                     }
                 }
@@ -79,8 +88,52 @@ fn run_loop(
 
         for workflow in &workflows {
             if schedule_is_due(workflow, &mut schedule_fired) {
-                run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock);
+                run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock, app, None);
             }
+        }
+
+        for workflow in &workflows {
+            let Some(listener) = webhooks.get(&workflow.id) else { continue };
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0_u8; 8192];
+                let size = stream.read(&mut request).unwrap_or_default();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let wanted_path = trigger_node(workflow)
+                    .and_then(|node| string_config(node, "path"))
+                    .unwrap_or_else(|| "/conduit".into());
+                let valid = request.lines().next().is_some_and(|line| {
+                    let mut parts = line.split_whitespace();
+                    matches!(parts.next(), Some("POST")) && parts.next() == Some(wanted_path.as_str())
+                });
+                let response = if valid {
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 8\r\nConnection: close\r\n\r\naccepted"
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found"
+                };
+                let _ = stream.write_all(response.as_bytes());
+                if valid && !recently_ran(&mut cooldowns, &workflow.id) {
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    run_with_retries(db_path, workflow, "local webhook", None, cancelled, execution_lock, app, Some(body));
+                }
+            }
+        }
+
+        if last_mount_check.elapsed() >= Duration::from_secs(2) {
+            let current = mount_points();
+            for path in current.difference(&mounted) {
+                for workflow in &workflows {
+                    let Some(trigger) = trigger_node(workflow).filter(|node| node.data.node_type == "drive_mounted") else { continue };
+                    let matches_name = string_config(trigger, "mountName").is_none_or(|wanted| {
+                        path.file_name().is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&wanted.to_lowercase()))
+                    });
+                    if matches_name && !recently_ran(&mut cooldowns, &workflow.id) {
+                        let mounted_path = path.display().to_string();
+                        run_with_retries(db_path, workflow, "drive mounted", None, cancelled, execution_lock, app, Some(&mounted_path));
+                    }
+                }
+            }
+            mounted = current;
+            last_mount_check = Instant::now();
         }
 
         match event_rx.recv_timeout(Duration::from_millis(500)) {
@@ -96,7 +149,7 @@ fn run_loop(
                     if matching.is_empty() || recently_ran(&mut cooldowns, &workflow.id) {
                         continue;
                     }
-                    run_with_retries(db_path, workflow, "folder change", Some(&matching), cancelled, execution_lock);
+                    run_with_retries(db_path, workflow, "folder change", Some(&matching), cancelled, execution_lock, app, None);
                 }
             }
             Ok(Err(error)) => set_error(health, format!("Filesystem watcher: {error}")),
@@ -113,7 +166,7 @@ fn run_loop(
                 let current = folder_fingerprint(&folder);
                 if let Some(previous) = fingerprints.insert(workflow.id.clone(), current) {
                     if previous != current && !recently_ran(&mut cooldowns, &workflow.id) {
-                        run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock);
+                        run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
                     }
                 }
             }
@@ -125,6 +178,58 @@ fn run_loop(
     }
     if let Ok(mut value) = health.lock() {
         value.running = false;
+    }
+}
+
+fn refresh_webhooks(workflows: &[Workflow], listeners: &mut HashMap<String, TcpListener>) {
+    let desired: HashSet<String> = workflows
+        .iter()
+        .filter(|workflow| trigger_node(workflow).is_some_and(|node| node.data.node_type == "webhook"))
+        .map(|workflow| workflow.id.clone())
+        .collect();
+    listeners.retain(|id, _| desired.contains(id));
+    for workflow in workflows {
+        if listeners.contains_key(&workflow.id) {
+            continue;
+        }
+        let Some(trigger) = trigger_node(workflow).filter(|node| node.data.node_type == "webhook") else { continue };
+        let port = number_config(trigger, "port").unwrap_or(43_821.0).round() as u16;
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            let _ = listener.set_nonblocking(true);
+            listeners.insert(workflow.id.clone(), listener);
+        }
+    }
+}
+
+fn mount_points() -> HashSet<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let user = std::env::var("USER").unwrap_or_default();
+        [PathBuf::from("/media"), PathBuf::from("/run/media").join(user)]
+            .into_iter()
+            .filter_map(|root| std::fs::read_dir(root).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::read_dir("/Volumes")
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        (b'D'..=b'Z')
+            .map(|letter| PathBuf::from(format!("{}:\\", letter as char)))
+            .filter(|path| path.exists())
+            .collect()
     }
 }
 
@@ -238,14 +343,21 @@ fn run_with_retries(
     event_paths: Option<&[PathBuf]>,
     cancelled: &AtomicBool,
     execution_lock: &Mutex<()>,
+    app: &Option<AppHandle>,
+    initial_context: Option<&str>,
 ) {
     let Ok(_guard) = execution_lock.lock() else { return };
     cancelled.store(false, Ordering::Relaxed);
     let attempts = retry_count(workflow);
     let mut final_error = None;
     for attempt in 0..attempts {
-        match engine::execute(workflow, false, db_path, trigger, event_paths, true, cancelled) {
-            Ok(_) => return,
+        match engine::execute(workflow, false, db_path, trigger, event_paths, true, cancelled, initial_context) {
+            Ok(result) => {
+                if let Some(app) = app {
+                    crate::send_notifications(app, &result);
+                }
+                return;
+            }
             Err(error) => {
                 if error == "Run stopped by user" {
                     return;
@@ -340,7 +452,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::new(AtomicBool::new(false));
         let execution_lock = Arc::new(Mutex::new(()));
-        spawn(database_path.clone(), health, shutdown.clone(), cancelled, execution_lock);
+        spawn(database_path.clone(), health, shutdown.clone(), cancelled, execution_lock, None);
         thread::sleep(Duration::from_secs(1));
         let source = directory.join("sample.txt");
         std::fs::write(&source, b"background engine").unwrap();

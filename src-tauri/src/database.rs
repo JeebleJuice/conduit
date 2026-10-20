@@ -1,5 +1,5 @@
 use crate::engine::workflow_signature;
-use crate::models::{RunRecord, Workflow, WorkflowRuntimeStatus};
+use crate::models::{ReversibleOperation, RunRecord, Workflow, WorkflowRuntimeStatus};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
@@ -55,6 +55,15 @@ pub(crate) fn initialize(path: &Path) -> Result<(), String> {
                 size INTEGER NOT NULL,
                 processed_at TEXT NOT NULL,
                 PRIMARY KEY (workflow_id, path, modified_ns, size)
+            );
+            CREATE TABLE IF NOT EXISTS run_operations (
+                run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                source TEXT,
+                destination TEXT,
+                undone INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (run_id, sequence)
             );
             CREATE INDEX IF NOT EXISTS runs_workflow_started
                 ON runs(workflow_id, started_at DESC);",
@@ -193,6 +202,8 @@ fn trigger_state(workflow: &Workflow) -> &'static str {
         Some("folder_changed") => "watching",
         Some("schedule") => "scheduled",
         Some("startup") => "armed",
+        Some("drive_mounted") => "watching",
+        Some("webhook") => "listening",
         _ => "ready",
     }
 }
@@ -246,6 +257,7 @@ fn status_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRuntimeS
             "watching" => "Watching for filesystem changes".into(),
             "scheduled" => "Waiting for the next scheduled time".into(),
             "armed" => "Runs once when the background engine starts".into(),
+            "listening" => "Listening on a loopback-only webhook".into(),
             "ready" => "Dry run approved; ready to enable".into(),
             "needs_preview" => "A dry run is required".into(),
             _ => "Background execution is paused".into(),
@@ -284,6 +296,53 @@ pub(crate) fn finish_run(path: &Path, run: &RunRecord) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())
+}
+
+pub(crate) fn record_operation(
+    path: &Path,
+    run_id: &str,
+    sequence: usize,
+    action: &str,
+    source: Option<&str>,
+    destination: Option<&str>,
+) -> Result<(), String> {
+    open(path)?
+        .execute(
+            "INSERT OR REPLACE INTO run_operations VALUES (?1,?2,?3,?4,?5,0)",
+            params![run_id, sequence as i64, action, source, destination],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn reversible_operations(path: &Path, run_id: &str) -> Result<Vec<ReversibleOperation>, String> {
+    let connection = open(path)?;
+    let mut statement = connection
+        .prepare("SELECT sequence,action,source,destination FROM run_operations WHERE run_id=?1 AND undone=0 ORDER BY sequence DESC")
+        .map_err(|error| error.to_string())?;
+    let operations = statement
+        .query_map([run_id], |row| {
+            Ok(ReversibleOperation {
+                sequence: row.get(0)?,
+                action: row.get(1)?,
+                source: row.get(2)?,
+                destination: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string());
+    operations
+}
+
+pub(crate) fn mark_operation_undone(path: &Path, run_id: &str, sequence: i64) -> Result<(), String> {
+    open(path)?
+        .execute(
+            "UPDATE run_operations SET undone=1 WHERE run_id=?1 AND sequence=?2",
+            params![run_id, sequence],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn record_failure(path: &Path, workflow: &Workflow, trigger: &str, message: &str) -> Result<(), String> {

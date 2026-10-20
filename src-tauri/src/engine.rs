@@ -1,4 +1,4 @@
-use crate::database;
+use crate::{actions, database};
 use crate::models::{EngineResult, PreviewOperation, RunRecord, Workflow, WorkflowNode};
 use chrono::Utc;
 use serde_json::Value;
@@ -152,6 +152,20 @@ fn expand_template(template: &str, source: Option<&Path>) -> String {
         .replace("{ext}", &extension)
 }
 
+fn apply_form_values(template: &str, workflow: &Workflow) -> String {
+    let mut output = template.to_owned();
+    if let Some(trigger) = trigger_node(workflow) {
+        for (key, value) in &trigger.data.config {
+            if let Some(field) = key.strip_prefix("form.") {
+                if let Some(value) = value.as_str() {
+                    output = output.replace(&format!("{{form.{field}}}"), value);
+                }
+            }
+        }
+    }
+    output
+}
+
 fn condition_matches(workflow: &Workflow, file: &Path) -> bool {
     workflow.nodes.iter().filter(|node| node.data.kind == "condition").all(|node| {
         match node.data.node_type.as_str() {
@@ -250,39 +264,84 @@ fn collision_safe(destination: PathBuf) -> PathBuf {
 
 fn plan_operations(
     workflow: &Workflow,
+    ordered: &[&WorkflowNode],
     files: &[PathBuf],
     permissions: &[PathBuf],
 ) -> Result<Vec<PreviewOperation>, String> {
     let mut operations = Vec::new();
-    for node in workflow.nodes.iter().filter(|node| node.data.kind == "action") {
+    let mut routed: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for node in ordered.iter().copied().filter(|node| node.data.kind == "action") {
         let destination = string_config(node, "destination")
             .map(|raw| expand_home(&expand_template(&raw, None)))
             .transpose()?
             .map(|path| assert_allowed(&path, permissions))
             .transpose()?;
-        if matches!(node.data.node_type.as_str(), "copy" | "move" | "rename" | "checksum")
-            && !files.is_empty()
-        {
-            for source in files {
-                let target_directory = if node.data.node_type == "rename" {
-                    source.parent()
-                } else {
-                    destination.as_deref()
+        let destination = if node.data.node_type == "write_text" {
+            destination.map(collision_safe)
+        } else {
+            destination
+        };
+        let configured_source = string_config(node, "source")
+            .or_else(|| string_config(node, "repository"))
+            .map(|raw| expand_home(&raw))
+            .transpose()?
+            .map(|path| assert_allowed(&path, permissions))
+            .transpose()?;
+        let uses_files = matches!(
+            node.data.node_type.as_str(),
+            "copy" | "move" | "rename" | "checksum" | "trash" | "compress" | "extract" |
+            "media_convert" | "ocr" | "document_metadata"
+        );
+        let sources: Vec<PathBuf> = if uses_files && !files.is_empty() {
+            files.to_vec()
+        } else {
+            configured_source.clone().into_iter().collect()
+        };
+        if uses_files && !sources.is_empty() {
+            for original_source in &sources {
+                let source = routed.get(original_source).cloned().unwrap_or_else(|| original_source.clone());
+                let target = match node.data.node_type.as_str() {
+                    "copy" | "move" => destination.as_ref().map(|directory| {
+                        let name = string_config(node, "template")
+                            .map(|template| expand_template(&template, Some(&source)))
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| source.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                        collision_safe(directory.join(name))
+                    }),
+                    "rename" => source.parent().map(|directory| {
+                        let name = string_config(node, "template")
+                            .map(|template| expand_template(&template, Some(&source)))
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| source.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                        collision_safe(directory.join(name))
+                    }),
+                    "media_convert" => destination.as_ref().map(|directory| {
+                        let extension = string_config(node, "outputExtension").unwrap_or_else(|| "webp".into());
+                        collision_safe(directory.join(source.file_stem().unwrap_or_default()).with_extension(extension.trim_start_matches('.')))
+                    }),
+                    "compress" => destination.clone().map(collision_safe),
+                    "extract" => destination.clone(),
+                    "checksum" => Some(collision_safe(PathBuf::from(format!("{}.sha256", source.display())))),
+                    _ => None,
                 };
-                let target = target_directory.map(|directory| {
-                    let name = string_config(node, "template")
-                        .map(|template| expand_template(&template, Some(source)))
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or_else(|| source.file_name().unwrap_or_default().to_string_lossy().into_owned());
-                    collision_safe(directory.join(name))
-                });
+                if matches!(node.data.node_type.as_str(), "copy" | "move" | "rename" | "media_convert" | "compress") {
+                    if let Some(target) = &target {
+                        routed.insert(original_source.clone(), target.clone());
+                        routed.insert(source.clone(), target.clone());
+                    }
+                }
                 operations.push(PreviewOperation {
                     node_id: node.id.clone(),
                     node_label: node.data.label.clone(),
                     action: node.data.node_type.clone(),
                     source: Some(source.display().to_string()),
                     destination: target.map(|path| path.display().to_string()),
-                    warning: (node.data.node_type == "move").then(|| "Original file will be moved".into()),
+                    warning: match node.data.node_type.as_str() {
+                        "move" => Some("Original file will be moved".into()),
+                        "trash" => Some("File will be sent to desktop trash".into()),
+                        "http_request" => Some("External effects cannot be undone".into()),
+                        _ => None,
+                    },
                 });
             }
         } else {
@@ -290,9 +349,13 @@ fn plan_operations(
                 node_id: node.id.clone(),
                 node_label: node.data.label.clone(),
                 action: node.data.node_type.clone(),
-                source: None,
-                destination: destination.map(|path| path.display().to_string()),
-                warning: None,
+                source: configured_source.map(|path| path.display().to_string()),
+                destination: if node.data.node_type == "notification" {
+                    string_config(node, "message").map(|message| apply_form_values(&message, workflow))
+                } else {
+                    destination.map(|path| path.display().to_string())
+                },
+                warning: (node.data.node_type == "http_request").then(|| "External effects cannot be undone".into()),
             });
         }
     }
@@ -303,15 +366,41 @@ fn perform_operations(
     operations: &[PreviewOperation],
     workflow: &Workflow,
     cancelled: &AtomicBool,
+    db_path: &Path,
+    run_id: &str,
+    initial_context: Option<&str>,
 ) -> Result<(), String> {
-    for operation in operations {
+    let mut context = initial_context.unwrap_or_default().to_owned();
+    for (sequence, operation) in operations.iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Run stopped by user".into());
+        }
+        let node = workflow
+            .nodes
+            .iter()
+            .find(|node| node.id == operation.node_id)
+            .ok_or("An action node no longer exists")?;
+        if actions::run(operation, node, &mut context)? {
+            if matches!(operation.action.as_str(), "compress" | "media_convert") {
+                database::record_operation(
+                    db_path,
+                    run_id,
+                    sequence,
+                    &operation.action,
+                    operation.source.as_deref(),
+                    operation.destination.as_deref(),
+                )?;
+            }
+            continue;
         }
         match operation.action.as_str() {
             "create_directory" => {
                 if let Some(destination) = &operation.destination {
+                    let created = !Path::new(destination).exists();
                     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
+                    if created {
+                        database::record_operation(db_path, run_id, sequence, "create_directory", None, Some(destination))?;
+                    }
                 }
             }
             "copy" => {
@@ -320,6 +409,7 @@ fn perform_operations(
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
                     fs::copy(source, destination).map_err(|error| error.to_string())?;
+                    database::record_operation(db_path, run_id, sequence, "copy", Some(source), Some(destination))?;
                 }
             }
             "move" => {
@@ -333,20 +423,17 @@ fn perform_operations(
                             fs::remove_file(source)
                         })
                         .map_err(|error| error.to_string())?;
+                    database::record_operation(db_path, run_id, sequence, "move", Some(source), Some(destination))?;
                 }
             }
             "rename" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
                     fs::rename(source, destination).map_err(|error| error.to_string())?;
+                    database::record_operation(db_path, run_id, sequence, "rename", Some(source), Some(destination))?;
                 }
             }
             "write_text" => {
                 if let Some(destination) = &operation.destination {
-                    let node = workflow
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == operation.node_id)
-                        .ok_or("The text action no longer exists")?;
                     let content = string_config(node, "content").unwrap_or_else(|| {
                         format!(
                             "# {}\n\nCreated by Conduit on {}.\n",
@@ -354,18 +441,21 @@ fn perform_operations(
                             Utc::now().format("%Y-%m-%d")
                         )
                     });
+                    let content = apply_form_values(&content, workflow).replace("{input}", &context);
                     if let Some(parent) = Path::new(destination).parent() {
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                     }
                     fs::write(destination, content).map_err(|error| error.to_string())?;
+                    database::record_operation(db_path, run_id, sequence, "write_text", None, Some(destination))?;
                 }
             }
             "checksum" => {
-                if let Some(source) = &operation.source {
+                if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
                     let bytes = fs::read(source).map_err(|error| error.to_string())?;
                     let digest = format!("{:x}", Sha256::digest(bytes));
-                    fs::write(format!("{source}.sha256"), format!("{digest}  {source}\n"))
+                    fs::write(destination, format!("{digest}  {source}\n"))
                         .map_err(|error| error.to_string())?;
+                    database::record_operation(db_path, run_id, sequence, "checksum", Some(source), Some(destination))?;
                 }
             }
             _ => {}
@@ -382,6 +472,7 @@ pub(crate) fn execute(
     event_paths: Option<&[PathBuf]>,
     background: bool,
     cancelled: &AtomicBool,
+    initial_context: Option<&str>,
 ) -> Result<EngineResult, String> {
     let started = Instant::now();
     let ordered = validate_graph(workflow)?;
@@ -394,14 +485,16 @@ pub(crate) fn execute(
         && workflow.nodes.iter().any(|node| {
             matches!(
                 node.data.node_type.as_str(),
-                "copy" | "move" | "rename" | "write_text" | "create_directory" | "checksum"
+                "copy" | "move" | "rename" | "write_text" | "create_directory" | "checksum" |
+                "trash" | "compress" | "extract" | "media_convert" | "git_summary" | "ocr" |
+                "document_metadata"
             )
         })
     {
         return Err("Add at least one folder permission before using filesystem actions".into());
     }
     let files = candidate_files(workflow, &permissions, event_paths, db_path, background)?;
-    let operations = plan_operations(workflow, &files, &permissions)?;
+    let operations = plan_operations(workflow, &ordered, &files, &permissions)?;
 
     if dry_run {
         database::approve_preview(db_path, workflow)?;
@@ -417,15 +510,15 @@ pub(crate) fn execute(
         duration_ms: 0,
         status: if dry_run { "preview".into() } else { "running".into() },
         files: files.len(),
-        reversible: operations.iter().all(|operation| {
-            matches!(operation.action.as_str(), "copy" | "move" | "rename" | "create_directory")
+        reversible: !dry_run && operations.iter().all(|operation| {
+            matches!(operation.action.as_str(), "copy" | "move" | "rename" | "create_directory" | "write_text" | "checksum" | "compress" | "media_convert")
         }),
         message: String::new(),
     };
     database::begin_run(db_path, &run, trigger)?;
 
     if !dry_run {
-        if let Err(error) = perform_operations(&operations, workflow, cancelled) {
+        if let Err(error) = perform_operations(&operations, workflow, cancelled, db_path, &run.id, initial_context) {
             run.status = if error == "Run stopped by user" { "stopped".into() } else { "failed".into() };
             run.duration_ms = started.elapsed().as_millis();
             run.message = format!("{trigger}: {error}");
@@ -437,11 +530,6 @@ pub(crate) fn execute(
             for operation in &operations {
                 if let Some(destination) = &operation.destination {
                     processed.push(PathBuf::from(destination));
-                }
-                if operation.action == "checksum" {
-                    if let Some(source) = &operation.source {
-                        processed.push(PathBuf::from(format!("{source}.sha256")));
-                    }
                 }
             }
             processed.sort();
@@ -471,7 +559,8 @@ pub(crate) fn execute(
 
     let supported = [
         "manual", "folder_changed", "schedule", "startup", "extension", "file_size", "age", "exists",
-        "create_directory", "copy", "move", "rename", "write_text", "checksum",
+        "create_directory", "copy", "move", "rename", "write_text", "checksum", "notification", "trash",
+        "compress", "extract", "http_request", "media_convert", "git_summary", "ocr", "document_metadata",
     ];
     let node_statuses = ordered
         .into_iter()
@@ -500,6 +589,44 @@ mod tests {
         let original = directory.join("report.pdf");
         fs::write(&original, b"one").unwrap();
         assert_eq!(collision_safe(original), directory.join("report-2.pdf"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn discovery_is_bounded_for_large_folders() {
+        let directory = std::env::temp_dir().join(format!("conduit-large-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        for index in 0..520 {
+            fs::write(directory.join(format!("{index:04}.txt")), b"test").unwrap();
+        }
+        let database_path = directory.join("runtime.sqlite3");
+        database::initialize(&database_path).unwrap();
+        let workflow = Workflow {
+            id: "large-folder".into(),
+            name: "Large folder".into(),
+            enabled: false,
+            permissions: vec![directory.display().to_string()],
+            nodes: vec![
+                WorkflowNode {
+                    id: "trigger".into(),
+                    data: crate::models::NodeData {
+                        label: "Folder".into(), kind: "trigger".into(), node_type: "folder_changed".into(),
+                        config: HashMap::from([("path".into(), Value::String(directory.display().to_string()))]),
+                    },
+                },
+                WorkflowNode {
+                    id: "action".into(),
+                    data: crate::models::NodeData {
+                        label: "Checksum".into(), kind: "action".into(), node_type: "checksum".into(),
+                        config: HashMap::from([("maxFiles".into(), Value::from(500))]),
+                    },
+                },
+            ],
+            edges: vec![crate::models::WorkflowEdge { source: "trigger".into(), target: "action".into() }],
+        };
+        let permissions = vec![directory.canonicalize().unwrap()];
+        let files = candidate_files(&workflow, &permissions, None, &database_path, false).unwrap();
+        assert_eq!(files.len(), 500);
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -5,6 +5,8 @@ export const nodeCatalog = [
   { kind: "trigger", nodeType: "folder_changed", label: "Folder changed", description: "Watch a folder for new files" },
   { kind: "trigger", nodeType: "schedule", label: "Schedule", description: "Run at a time or interval" },
   { kind: "trigger", nodeType: "startup", label: "App startup", description: "Run when Conduit starts" },
+  { kind: "trigger", nodeType: "drive_mounted", label: "Drive mounted", description: "Run when removable storage appears" },
+  { kind: "trigger", nodeType: "webhook", label: "Local webhook", description: "Listen on a loopback-only endpoint" },
   { kind: "condition", nodeType: "extension", label: "File extension", description: "Continue for matching files" },
   { kind: "condition", nodeType: "file_size", label: "File size", description: "Compare file size to a limit" },
   { kind: "condition", nodeType: "age", label: "File age", description: "Filter by modified time" },
@@ -16,6 +18,14 @@ export const nodeCatalog = [
   { kind: "action", nodeType: "write_text", label: "Write text", description: "Write or append a template" },
   { kind: "action", nodeType: "checksum", label: "Checksum", description: "Calculate a SHA-256 digest" },
   { kind: "action", nodeType: "notification", label: "Notification", description: "Show a desktop message" },
+  { kind: "action", nodeType: "trash", label: "Send to trash", description: "Move files to desktop trash" },
+  { kind: "action", nodeType: "compress", label: "Create ZIP", description: "Create a collision-safe ZIP archive" },
+  { kind: "action", nodeType: "extract", label: "Extract ZIP", description: "Safely extract without path traversal" },
+  { kind: "action", nodeType: "http_request", label: "HTTP request", description: "Make an allowlisted, timed request" },
+  { kind: "action", nodeType: "media_convert", label: "Convert media", description: "Transform media with FFmpeg" },
+  { kind: "action", nodeType: "git_summary", label: "Git summary", description: "Collect recent commit messages" },
+  { kind: "action", nodeType: "ocr", label: "Read text (OCR)", description: "Extract text with Tesseract" },
+  { kind: "action", nodeType: "document_metadata", label: "Document metadata", description: "Read metadata with ExifTool" },
 ] as const;
 
 export const initialWorkflows: Workflow[] = [

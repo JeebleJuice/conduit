@@ -4,6 +4,9 @@ import type { WorkflowNode } from "../types";
 const fieldMap: Record<string, { key: string; label: string; placeholder: string; type?: string }[]> = {
   folder_changed: [{ key: "path", label: "Folder", placeholder: "~/Downloads" }],
   schedule: [{ key: "schedule", label: "Cron schedule", placeholder: "0 17 * * 5" }, { key: "retryCount", label: "Maximum attempts", placeholder: "1", type: "number" }],
+  manual: [{ key: "formFields", label: "Form fields (comma separated)", placeholder: "project, week ending" }],
+  drive_mounted: [{ key: "mountName", label: "Drive name contains", placeholder: "PHONE" }],
+  webhook: [{ key: "port", label: "Loopback port", placeholder: "43821", type: "number" }, { key: "path", label: "Endpoint path", placeholder: "/conduit" }],
   extension: [{ key: "extension", label: "Extension", placeholder: ".pdf" }],
   file_size: [{ key: "maxMb", label: "Maximum MB", placeholder: "25", type: "number" }],
   age: [{ key: "hours", label: "Older than (hours)", placeholder: "24", type: "number" }],
@@ -15,6 +18,14 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
   write_text: [{ key: "destination", label: "File", placeholder: "~/Notes/{date}.md" }, { key: "content", label: "Template", placeholder: "# Weekly note" }],
   checksum: [{ key: "source", label: "File", placeholder: "From previous node" }],
   notification: [{ key: "message", label: "Message", placeholder: "Workflow complete" }],
+  trash: [{ key: "source", label: "File", placeholder: "From previous node" }],
+  compress: [{ key: "source", label: "Source", placeholder: "From trigger" }, { key: "destination", label: "ZIP file", placeholder: "~/Archives/files-{date}.zip" }],
+  extract: [{ key: "source", label: "ZIP file", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Documents/Extracted" }],
+  http_request: [{ key: "url", label: "HTTPS URL", placeholder: "https://example.com/hook" }, { key: "method", label: "Method", placeholder: "POST" }, { key: "body", label: "Body template", placeholder: "{\"message\":\"{input}\"}" }, { key: "secretName", label: "Bearer secret name", placeholder: "api-token" }],
+  media_convert: [{ key: "source", label: "Source", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Media/Converted" }, { key: "outputExtension", label: "Output extension", placeholder: "webp" }],
+  git_summary: [{ key: "repository", label: "Repository", placeholder: "~/Dev/project" }, { key: "sinceDays", label: "Days to include", placeholder: "7", type: "number" }],
+  ocr: [{ key: "source", label: "Image or PDF", placeholder: "From trigger" }, { key: "language", label: "OCR language", placeholder: "eng" }],
+  document_metadata: [{ key: "source", label: "Document", placeholder: "From trigger" }],
 };
 
 export function Inspector({ node, permissions, onChange, onDelete, onClose }: { node?: WorkflowNode; permissions: string[]; onChange: (node: WorkflowNode) => void; onDelete: () => void; onClose: () => void }) {

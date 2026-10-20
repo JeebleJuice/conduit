@@ -1,5 +1,5 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
-import { Bell, CalendarClock, CheckCircle2, Copy, FileCheck2, FileInput, FileText, Filter, FolderInput, FolderPlus, Gauge, HardDrive, MousePointer2, Pencil, Play, RotateCw } from "lucide-react";
+import { Bell, CalendarClock, CheckCircle2, Copy, FileArchive, FileCheck2, FileInput, FileText, Filter, FolderInput, FolderPlus, Gauge, GitBranch, Globe2, HardDrive, Image, MousePointer2, Pencil, Play, PlugZap, RotateCw, ScanText, Trash2, Usb } from "lucide-react";
 import type { WorkflowNode } from "../types";
 
 const icons: Record<string, typeof Play> = {
@@ -7,6 +7,8 @@ const icons: Record<string, typeof Play> = {
   extension: FileCheck2, file_size: Gauge, age: RotateCw, exists: HardDrive,
   create_directory: FolderPlus, copy: Copy, move: FileInput, rename: Pencil,
   write_text: FileText, checksum: CheckCircle2, notification: Bell,
+  drive_mounted: Usb, webhook: PlugZap, trash: Trash2, compress: FileArchive, extract: FileArchive,
+  http_request: Globe2, media_convert: Image, git_summary: GitBranch, ocr: ScanText, document_metadata: FileText,
 };
 
 export function ConduitNode({ data, selected }: NodeProps<WorkflowNode>) {

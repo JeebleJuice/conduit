@@ -1,0 +1,19 @@
+{
+  "id": "template-screenshot-ocr",
+  "name": "Screenshot OCR archive",
+  "description": "Extract text from new screenshots and save it as a dated Markdown note.",
+  "enabled": false,
+  "updatedAt": "2026-10-18T00:00:00Z",
+  "permissions": ["~/Pictures/Screenshots", "~/Documents/OCR"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":170},"data":{"kind":"trigger","nodeType":"folder_changed","label":"Screenshot created","description":"Watch the screenshots folder","config":{"path":"~/Pictures/Screenshots"}}},
+    {"id":"filter","type":"conduit","position":{"x":350,"y":170},"data":{"kind":"condition","nodeType":"extension","label":"PNG image","description":"Only process PNG files","config":{"extension":".png"}}},
+    {"id":"ocr","type":"conduit","position":{"x":620,"y":170},"data":{"kind":"action","nodeType":"ocr","label":"Read screenshot text","description":"Use Tesseract OCR","config":{"language":"eng"}}},
+    {"id":"write","type":"conduit","position":{"x":890,"y":170},"data":{"kind":"action","nodeType":"write_text","label":"Save OCR note","description":"Write extracted text","config":{"destination":"~/Documents/OCR/{date}-screenshot.md","content":"# Screenshot text — {date}\n\n{input}\n"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"filter"},
+    {"id":"e2","source":"filter","target":"ocr","sourceHandle":"true"},
+    {"id":"e3","source":"ocr","target":"write"}
+  ]
+}

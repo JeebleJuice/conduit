@@ -1,0 +1,19 @@
+{
+  "id": "template-phone-photo-import",
+  "name": "Phone photo import",
+  "description": "React to a mounted phone, copy configured originals, checksum them, and report completion.",
+  "enabled": false,
+  "updatedAt": "2026-10-18T00:00:00Z",
+  "permissions": ["/run/media", "~/Pictures/Phone Archive"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":170},"data":{"kind":"trigger","nodeType":"drive_mounted","label":"Phone mounted","description":"Match a removable volume","config":{"mountName":"PHONE"}}},
+    {"id":"copy","type":"conduit","position":{"x":370,"y":170},"data":{"kind":"action","nodeType":"copy","label":"Copy originals","description":"Collision-safe archive copy","config":{"source":"/run/media/PHONE/DCIM/latest.jpg","destination":"~/Pictures/Phone Archive","maxFiles":250,"retryCount":2}}},
+    {"id":"checksum","type":"conduit","position":{"x":660,"y":170},"data":{"kind":"action","nodeType":"checksum","label":"Write checksum","description":"Create SHA-256 sidecar","config":{}}},
+    {"id":"notify","type":"conduit","position":{"x":950,"y":170},"data":{"kind":"action","nodeType":"notification","label":"Import complete","description":"Show completion","config":{"message":"Phone import completed"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"copy"},
+    {"id":"e2","source":"copy","target":"checksum"},
+    {"id":"e3","source":"checksum","target":"notify"}
+  ]
+}
