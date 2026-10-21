@@ -134,18 +134,7 @@ pub(crate) fn run(
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(7)
                 .clamp(1, 365);
-            let output = external(
-                "git",
-                &[
-                    "-C",
-                    repository,
-                    "log",
-                    &format!("--since={since} days ago"),
-                    "--no-merges",
-                    "--pretty=format:- %h %s (%an)",
-                    "--max-count=200",
-                ],
-            )?;
+            let output = git_workspace_summary(Path::new(repository), since)?;
             append_context(context, &output);
             Ok(true)
         }
@@ -396,6 +385,106 @@ fn external_path(command: &Path, arguments: &[String]) -> Result<String, String>
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn git_repositories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let root = root.canonicalize().map_err(|error| format!("Cannot inspect {}: {error}", root.display()))?;
+    if root.join(".git").exists() {
+        return Ok(vec![root]);
+    }
+    if !root.is_dir() {
+        return Err(format!("Git workspace is not a directory: {}", root.display()));
+    }
+
+    let mut repositories = fs::read_dir(&root)
+        .map_err(|error| format!("Cannot inspect {}: {error}", root.display()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.path().canonicalize().ok())
+        .filter(|path| path.starts_with(&root) && path.is_dir() && path.join(".git").exists())
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.truncate(100);
+    Ok(repositories)
+}
+
+fn git_command(repository: &Path, arguments: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "Optional tool `git` is not installed".to_owned()
+            } else {
+                error.to_string()
+            }
+        })?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "Cannot summarize {}: {}",
+            repository.display(),
+            message
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_workspace_summary(root: &Path, since_days: u64) -> Result<String, String> {
+    let repositories = git_repositories(root)?;
+    if repositories.is_empty() {
+        return Ok("No Git repositories were found in the projects folder.".into());
+    }
+
+    let since = format!("--since={since_days} days ago");
+    let mut sections = Vec::new();
+    for repository in &repositories {
+        let commits = if git_command(repository, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+            git_command(
+                repository,
+                &["log", &since, "--no-merges", "--pretty=format:- %h %s (%an)", "--max-count=30"],
+            )?
+        } else {
+            String::new()
+        };
+        let status = git_command(repository, &["status", "--short", "--untracked-files=normal"])?;
+        if commits.is_empty() && status.is_empty() {
+            continue;
+        }
+
+        let name = repository.file_name().unwrap_or_default().to_string_lossy();
+        let mut section = format!("## {name}\n\nPath: `{}`\n", repository.display());
+        if commits.is_empty() {
+            section.push_str("\nNo commits in this period.\n");
+        } else {
+            section.push_str("\n### Commits\n\n");
+            section.push_str(&commits);
+            section.push('\n');
+        }
+        if !status.is_empty() {
+            section.push_str("\n### Uncommitted changes\n\n```text\n");
+            for line in status.lines().take(100) {
+                section.push_str(line);
+                section.push('\n');
+            }
+            if status.lines().count() > 100 {
+                section.push_str("… additional changes omitted\n");
+            }
+            section.push_str("```\n");
+        }
+        sections.push(section);
+    }
+
+    if sections.is_empty() {
+        Ok(format!(
+            "No commits or uncommitted changes were found across {} repositories.",
+            repositories.len()
+        ))
+    } else {
+        Ok(sections.join("\n"))
+    }
+}
+
 fn create_zip(source: &Path, destination: &Path) -> Result<(), String> {
     const MAX_ARCHIVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
     if let Some(parent) = destination.parent() {
@@ -550,6 +639,32 @@ mod tests {
         let result = extract_zip(&archive_path, &root.join("output"));
         assert!(result.is_err());
         assert!(!root.join("escape.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_workspace_discovers_only_direct_repositories() {
+        let root = std::env::temp_dir().join(format!("conduit-git-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("alpha/.git")).unwrap();
+        fs::create_dir_all(root.join("ordinary/nested/.git")).unwrap();
+        fs::create_dir_all(root.join("beta/.git")).unwrap();
+        let repositories = git_repositories(&root).unwrap();
+        assert_eq!(repositories.len(), 2);
+        assert!(repositories[0].ends_with("alpha"));
+        assert!(repositories[1].ends_with("beta"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_workspace_reports_uncommitted_work_without_history() {
+        let root = std::env::temp_dir().join(format!("conduit-git-summary-test-{}", uuid::Uuid::new_v4()));
+        let repository = root.join("new-project");
+        fs::create_dir_all(&repository).unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(&repository).status().unwrap().success());
+        fs::write(repository.join("README.md"), "# New project\n").unwrap();
+        let summary = git_workspace_summary(&root, 7).unwrap();
+        assert!(summary.contains("## new-project"));
+        assert!(summary.contains("README.md"));
         fs::remove_dir_all(root).unwrap();
     }
 }

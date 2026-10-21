@@ -2,6 +2,12 @@
 
 Conduit adds new built-in workflows once per local profile. They start disabled. Open each workflow, check its paths, run **Dry run**, inspect the exact plan, then enable it. Editing a material setting revokes approval and disables the workflow again.
 
+## Weekly development note
+
+Every Friday at 17:00, the workflow inspects each direct Git repository under `~/Dev`. It includes repositories with commits from the previous seven days or current uncommitted changes, recording up to 30 non-merge commits and 100 working-tree status lines per repository. Clean repositories with no recent commits are omitted.
+
+The result is written to `~/Documents/Obsidian Notes/Weekly/{date}.md` with Obsidian properties and prompts for wins, blockers, and next-week priorities. A seven-day catch-up window means one missed Friday run can execute after Conduit next starts; SQLite schedule claims prevent the same weekly slot from running twice. The workflow starts disabled and must receive a successful dry-run approval before it can run automatically.
+
 ## Smart download organizer
 
 The `Organize downloads` action watches only the top level of `~/Downloads`. Browser partial files ending in `.part`, `.crdownload`, `.download`, or `.tmp` are ignored.

@@ -23,7 +23,7 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
   extract: [{ key: "source", label: "ZIP file", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Documents/Extracted" }],
   http_request: [{ key: "url", label: "HTTPS URL", placeholder: "https://example.com/hook" }, { key: "method", label: "Method", placeholder: "POST" }, { key: "body", label: "Body template", placeholder: "{\"message\":\"{input}\"}" }, { key: "secretName", label: "Bearer secret name", placeholder: "api-token" }],
   media_convert: [{ key: "source", label: "Source", placeholder: "From trigger" }, { key: "destination", label: "Destination folder", placeholder: "~/Media/Converted" }, { key: "outputExtension", label: "Output extension", placeholder: "webp" }],
-  git_summary: [{ key: "repository", label: "Repository", placeholder: "~/Dev/project" }, { key: "sinceDays", label: "Days to include", placeholder: "7", type: "number" }],
+  git_summary: [{ key: "repository", label: "Repository or projects folder", placeholder: "~/Dev" }, { key: "sinceDays", label: "Days to include", placeholder: "7", type: "number" }],
   ocr: [{ key: "source", label: "Image or PDF", placeholder: "From trigger" }, { key: "language", label: "OCR language", placeholder: "eng" }],
   document_metadata: [{ key: "source", label: "Document", placeholder: "From trigger" }],
   organize_downloads: [

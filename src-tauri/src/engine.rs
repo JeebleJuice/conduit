@@ -480,6 +480,7 @@ fn perform_operations(
                             Utc::now().format("%Y-%m-%d")
                         )
                     });
+                    let content = expand_template(&content, None);
                     let content = apply_form_values(&content, workflow).replace("{input}", &context);
                     if let Some(parent) = Path::new(destination).parent() {
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -636,6 +637,14 @@ mod tests {
         fs::write(&original, b"one").unwrap();
         assert_eq!(collision_safe(original), directory.join("report-2.pdf"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn text_templates_expand_calendar_placeholders() {
+        let rendered = expand_template("# Week of {date} ({year}-{month})", None);
+        assert!(!rendered.contains("{date}"));
+        assert!(!rendered.contains("{year}"));
+        assert!(!rendered.contains("{month}"));
     }
 
     #[test]

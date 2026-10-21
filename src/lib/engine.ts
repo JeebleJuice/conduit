@@ -3,10 +3,18 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
-const BUILTINS_KEY = "conduit.builtins.v3";
+const BUILTINS_KEY = "conduit.builtins.v4";
 
-function upgradeBuiltins(workflows: Workflow[]): Workflow[] {
-  return workflows.map((workflow) => {
+export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Workflow[] {
+  const weeklyDefault = fallback.find((workflow) => workflow.id === "weekly-dev-note");
+  return workflows.filter((workflow) => workflow.id !== "organise-downloads").map((workflow) => {
+    if (
+      workflow.id === "weekly-dev-note"
+      && !workflow.nodes.some((node) => node.data.nodeType === "git_summary")
+      && weeklyDefault
+    ) {
+      return { ...weeklyDefault, enabled: false, updatedAt: new Date().toISOString() };
+    }
     if (workflow.id !== "smart-download-organizer-v2") return workflow;
 
     const permissions = workflow.permissions.includes("~/Programs")
@@ -37,7 +45,7 @@ export function loadWorkflows(fallback: Workflow[]): Workflow[] {
     }
     const parsed = JSON.parse(saved) as Workflow[];
     if (localStorage.getItem(BUILTINS_KEY) !== "installed") {
-      const upgraded = upgradeBuiltins(parsed);
+      const upgraded = upgradeBuiltins(parsed, fallback);
       const ids = new Set(upgraded.map((workflow) => workflow.id));
       const additions = fallback.filter((workflow) => !ids.has(workflow.id));
       localStorage.setItem(BUILTINS_KEY, "installed");
