@@ -38,7 +38,7 @@ Preview mode inspects the configured Inbox and writes a timestamped `candidates.
 
 ## Apply reviewed KMail cleanup
 
-After reviewing a `candidates.csv`, paste that exact path into the manual workflow's **Reviewed candidates.csv** field, dry-run the workflow, and run it. Conduit invokes the same fixed script with `--apply --report <exact path>`. The report must resolve inside the cleanup project's `runs/` directory. The Rust engine refuses apply mode unless the workflow trigger is manual—even if imported JSON tries to schedule it.
+After reviewing the newest preview, dry-run the manual workflow and run it. Conduit automatically selects the `candidates.csv` in the newest timestamped run directory and invokes the same fixed script with `--apply --report <resolved path>`. An older report can still be selected explicitly through the optional **Specific candidates.csv** field. Every report must resolve inside the cleanup project's `runs/` directory. The Rust engine refuses apply mode unless the workflow trigger is manual—even if imported JSON tries to schedule it.
 
 The existing KMail tool validates the account and folder IDs, verifies each message's current Akonadi ID and IMAP UID, moves only the reviewed rows in acknowledged batches, and stops on synchronization drift or timeout. Messages go to the visible `Cleanup Review` folder; they are not permanently deleted. This external mail operation is deliberately not advertised as undoable by Conduit.
 

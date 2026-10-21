@@ -202,20 +202,23 @@ pub(crate) fn run(
             let arguments: Vec<String> = match mode {
                 "preview" => Vec::new(),
                 "apply_reviewed" => {
-                    let report = node
-                        .data
-                        .config
-                        .get("reportPath")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or("Paste the exact reviewed candidates.csv path before applying KMail cleanup")?;
-                    let report = expand_user_path(report)?
-                        .canonicalize()
-                        .map_err(|error| format!("Cannot open reviewed report: {error}"))?;
                     let runs = canonical_project
                         .join("runs")
                         .canonicalize()
                         .map_err(|error| format!("KMail Cleanup runs directory is unavailable: {error}"))?;
+                    let configured_report = node
+                        .data
+                        .config
+                        .get("reportPath")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty());
+                    let report = if let Some(report) = configured_report {
+                        expand_user_path(report)?
+                            .canonicalize()
+                            .map_err(|error| format!("Cannot open reviewed report: {error}"))?
+                    } else {
+                        latest_candidates_report(&runs)?
+                    };
                     if !report.starts_with(&runs)
                         || report.file_name().and_then(|name| name.to_str()) != Some("candidates.csv")
                     {
@@ -403,6 +406,30 @@ fn git_repositories(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     repositories.sort();
     repositories.truncate(100);
     Ok(repositories)
+}
+
+fn latest_candidates_report(runs: &Path) -> Result<std::path::PathBuf, String> {
+    let canonical_runs = runs
+        .canonicalize()
+        .map_err(|error| format!("KMail Cleanup runs directory is unavailable: {error}"))?;
+    let mut reports = fs::read_dir(&canonical_runs)
+        .map_err(|error| format!("Cannot inspect KMail Cleanup runs: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let run_name = entry.file_name();
+            let report = entry.path().join("candidates.csv").canonicalize().ok()?;
+            (report.starts_with(&canonical_runs)
+                && report.is_file()
+                && report.file_name().and_then(|name| name.to_str()) == Some("candidates.csv"))
+                .then_some((run_name, report))
+        })
+        .collect::<Vec<_>>();
+    reports.sort_by(|left, right| left.0.cmp(&right.0));
+    reports
+        .pop()
+        .map(|(_, report)| report)
+        .ok_or_else(|| "No KMail cleanup preview was found. Run the preview workflow first.".into())
 }
 
 fn git_command(repository: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -665,6 +692,19 @@ mod tests {
         let summary = git_workspace_summary(&root, 7).unwrap();
         assert!(summary.contains("## new-project"));
         assert!(summary.contains("README.md"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn latest_kmail_report_uses_newest_run_directory() {
+        let root = std::env::temp_dir().join(format!("conduit-mail-report-test-{}", uuid::Uuid::new_v4()));
+        let older = root.join("20261014-180000-000001");
+        let newer = root.join("20261021-180000-000002");
+        fs::create_dir_all(&older).unwrap();
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(older.join("candidates.csv"), "older").unwrap();
+        fs::write(newer.join("candidates.csv"), "newer").unwrap();
+        assert_eq!(latest_candidates_report(&root).unwrap(), newer.join("candidates.csv"));
         fs::remove_dir_all(root).unwrap();
     }
 }

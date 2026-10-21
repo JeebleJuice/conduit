@@ -94,7 +94,7 @@ export const initialWorkflows: Workflow[] = [
     permissions: ["~/Dev/kmail-cleanup"],
     nodes: [
       { id: "mail-apply-trigger", type: "conduit", position: { x: 100, y: 180 }, data: { kind: "trigger", nodeType: "manual", label: "Manual confirmation", description: "Cannot be scheduled", config: {} } },
-      { id: "mail-apply", type: "conduit", position: { x: 440, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Apply reviewed preview", description: "Move exact revalidated messages", config: { source: "~/Dev/kmail-cleanup", mode: "apply_reviewed", reportPath: "" } } },
+      { id: "mail-apply", type: "conduit", position: { x: 440, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Apply latest preview", description: "Use the newest candidates.csv and revalidate messages", config: { source: "~/Dev/kmail-cleanup", mode: "apply_reviewed" } } },
       { id: "mail-applied", type: "conduit", position: { x: 780, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Cleanup applied", description: "Show completion", config: { message: "Reviewed KMail cleanup completed" } } },
     ],
     edges: [

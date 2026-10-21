@@ -36,7 +36,7 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
     { key: "maxFiles", label: "Maximum files per run", placeholder: "50", type: "number" },
   ],
   file_inventory: [{ key: "source", label: "Folder or file", placeholder: "~/Downloads" }, { key: "maxFiles", label: "Maximum files", placeholder: "100", type: "number" }],
-  kmail_cleanup: [{ key: "source", label: "KMail Cleanup project", placeholder: "~/Dev/kmail-cleanup" }, { key: "mode", label: "Mode", placeholder: "preview" }, { key: "reportPath", label: "Reviewed candidates.csv (apply mode)", placeholder: "~/Dev/kmail-cleanup/runs/.../candidates.csv" }],
+  kmail_cleanup: [{ key: "source", label: "KMail Cleanup project", placeholder: "~/Dev/kmail-cleanup" }, { key: "mode", label: "Mode", placeholder: "preview" }, { key: "reportPath", label: "Specific candidates.csv (optional)", placeholder: "Leave empty to use the latest preview" }],
 };
 
 export function Inspector({ node, permissions, onChange, onDelete, onClose }: { node?: WorkflowNode; permissions: string[]; onChange: (node: WorkflowNode) => void; onDelete: () => void; onClose: () => void }) {

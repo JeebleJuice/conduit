@@ -3,7 +3,7 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
-const BUILTINS_KEY = "conduit.builtins.v4";
+const BUILTINS_KEY = "conduit.builtins.v5";
 
 export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Workflow[] {
   const weeklyDefault = fallback.find((workflow) => workflow.id === "weekly-dev-note");
@@ -14,6 +14,23 @@ export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Wo
       && weeklyDefault
     ) {
       return { ...weeklyDefault, enabled: false, updatedAt: new Date().toISOString() };
+    }
+    if (workflow.id === "apply-reviewed-kmail-cleanup") {
+      const nodes = workflow.nodes.map((node) => {
+        if (node.data.nodeType !== "kmail_cleanup" || node.data.config.mode !== "apply_reviewed") return node;
+        const config = { ...node.data.config };
+        if (!config.reportPath) delete config.reportPath;
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            label: "Apply latest preview",
+            description: "Use the newest candidates.csv and revalidate messages",
+            config,
+          },
+        };
+      });
+      return { ...workflow, enabled: false, nodes, updatedAt: new Date().toISOString() };
     }
     if (workflow.id !== "smart-download-organizer-v2") return workflow;
 
