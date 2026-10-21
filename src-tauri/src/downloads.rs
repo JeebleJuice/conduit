@@ -65,7 +65,7 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
     } else if mime.as_deref() == Some("application/vnd.microsoft.portable-executable")
         || matches!(extension.as_str(), "rpm" | "deb" | "appimage" | "msi" | "exe" | "dmg" | "pkg" | "flatpakref")
     {
-        ("softwareRoot", "~/Downloads/Software", "")
+        ("softwareRoot", "~/Programs", "")
     } else if matches!(extension.as_str(), "xls" | "xlsx" | "ods" | "csv") {
         ("documentsRoot", "~/Documents", "Spreadsheets")
     } else if matches!(extension.as_str(), "ppt" | "pptx" | "odp") {
@@ -77,7 +77,7 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
     } else if matches!(extension.as_str(), "doc" | "docx" | "odt" | "rtf" | "txt" | "md") {
         ("documentsRoot", "~/Documents", "Text")
     } else {
-        ("otherRoot", "~/Downloads/Other", "")
+        return Ok(None);
     };
 
     let mut directory = root(node, category.0, category.1)?;
@@ -202,6 +202,16 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let source = root.join("video.mp4.part");
         fs::write(&source, b"partial").unwrap();
+        assert_eq!(destination(&source, &node(&root)).unwrap(), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn leaves_unrecognized_files_in_downloads() {
+        let root = std::env::temp_dir().join(format!("conduit-unknown-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("mystery.unknown-format");
+        fs::write(&source, b"unrecognized data").unwrap();
         assert_eq!(destination(&source, &node(&root)).unwrap(), None);
         fs::remove_dir_all(root).unwrap();
     }

@@ -14,7 +14,7 @@ Classification uses, in order:
 4. detected file signatures for common image, audio, video, and PDF data; and
 5. the lowercase filename extension as a fallback.
 
-Recognized finance, career, study, and travel documents go to matching subfolders under the configured Documents root. Other documents are grouped as PDFs, spreadsheets, presentations, ebooks, or text. Images and screenshots go under Pictures; audio and video use their XDG-style roots; archives, installers, and unknown files use explicitly configured folders.
+Recognized finance, career, study, and travel documents go to matching subfolders under the configured Documents root. Other documents are grouped as PDFs, spreadsheets, presentations, ebooks, or text. Images and screenshots go under Pictures; audio and video use their XDG-style roots; archives use the configured archive folder; and installers and packages go to `~/Programs` by default. Files whose type remains unknown stay directly in Downloads.
 
 Every resulting directory must remain inside the workflow permission roots. Directories are created when needed, existing files are never overwritten, and every move is journalled for Undo. Classification is intentionally conservative: content rules only select a broad destination and do not execute or upload the file.
 

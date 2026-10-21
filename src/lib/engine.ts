@@ -3,7 +3,28 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
-const BUILTINS_KEY = "conduit.builtins.v2";
+const BUILTINS_KEY = "conduit.builtins.v3";
+
+function upgradeBuiltins(workflows: Workflow[]): Workflow[] {
+  return workflows.map((workflow) => {
+    if (workflow.id !== "smart-download-organizer-v2") return workflow;
+
+    const permissions = workflow.permissions.includes("~/Programs")
+      ? workflow.permissions
+      : [...workflow.permissions, "~/Programs"];
+    const nodes = workflow.nodes.map((node) => {
+      if (node.data.nodeType !== "organize_downloads") return node;
+      const config = { ...node.data.config };
+      if (!config.softwareRoot || config.softwareRoot === "~/Downloads/Software") {
+        config.softwareRoot = "~/Programs";
+      }
+      delete config.otherRoot;
+      return { ...node, data: { ...node.data, config } };
+    });
+
+    return { ...workflow, enabled: false, permissions, nodes, updatedAt: new Date().toISOString() };
+  });
+}
 
 export const isTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -16,10 +37,11 @@ export function loadWorkflows(fallback: Workflow[]): Workflow[] {
     }
     const parsed = JSON.parse(saved) as Workflow[];
     if (localStorage.getItem(BUILTINS_KEY) !== "installed") {
-      const ids = new Set(parsed.map((workflow) => workflow.id));
+      const upgraded = upgradeBuiltins(parsed);
+      const ids = new Set(upgraded.map((workflow) => workflow.id));
       const additions = fallback.filter((workflow) => !ids.has(workflow.id));
       localStorage.setItem(BUILTINS_KEY, "installed");
-      return [...parsed, ...additions];
+      return [...upgraded, ...additions];
     }
     return parsed;
   } catch {
