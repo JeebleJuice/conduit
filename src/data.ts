@@ -26,6 +26,9 @@ export const nodeCatalog = [
   { kind: "action", nodeType: "git_summary", label: "Git summary", description: "Collect recent commit messages" },
   { kind: "action", nodeType: "ocr", label: "Read text (OCR)", description: "Extract text with Tesseract" },
   { kind: "action", nodeType: "document_metadata", label: "Document metadata", description: "Read metadata with ExifTool" },
+  { kind: "action", nodeType: "organize_downloads", label: "Organize downloads", description: "Route by type, name, and bounded content" },
+  { kind: "action", nodeType: "file_inventory", label: "File inventory", description: "Build a readable file list for a report" },
+  { kind: "action", nodeType: "kmail_cleanup", label: "KMail Cleanup", description: "Preview or apply the dedicated cleanup tool" },
 ] as const;
 
 export const initialWorkflows: Workflow[] = [
@@ -63,6 +66,76 @@ export const initialWorkflows: Workflow[] = [
     edges: [
       { id: "we1", source: "weekly-trigger", target: "weekly-action" },
       { id: "we2", source: "weekly-action", target: "weekly-notify" },
+    ],
+  },
+  {
+    id: "smart-download-organizer-v2",
+    name: "Smart download organizer",
+    description: "Route completed downloads by file type and bounded content inspection.",
+    enabled: false,
+    updatedAt: new Date().toISOString(),
+    permissions: ["~/Downloads", "~/Documents", "~/Pictures", "~/Videos", "~/Music"],
+    nodes: [
+      { id: "smart-trigger", type: "conduit", position: { x: 90, y: 180 }, data: { kind: "trigger", nodeType: "folder_changed", label: "Download completed", description: "Watch ~/Downloads", config: { path: "~/Downloads" } } },
+      { id: "smart-sort", type: "conduit", position: { x: 430, y: 180 }, data: { kind: "action", nodeType: "organize_downloads", label: "Classify and move", description: "Type, filename, and content rules", config: { documentsRoot: "~/Documents", picturesRoot: "~/Pictures", videosRoot: "~/Videos", musicRoot: "~/Music", archivesRoot: "~/Documents/Archives", softwareRoot: "~/Downloads/Software", otherRoot: "~/Downloads/Other", maxFiles: 50 } } },
+      { id: "smart-notify", type: "conduit", position: { x: 780, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Sorting complete", description: "Show a desktop notification", config: { message: "New downloads were organized" } } },
+    ],
+    edges: [
+      { id: "smart-e1", source: "smart-trigger", target: "smart-sort" },
+      { id: "smart-e2", source: "smart-sort", target: "smart-notify" },
+    ],
+  },
+  {
+    id: "weekly-kmail-cleanup-preview",
+    name: "Weekly KMail cleanup preview",
+    description: "Create a conservative review CSV every Sunday; never move mail automatically.",
+    enabled: false,
+    updatedAt: new Date().toISOString(),
+    permissions: ["~/Dev/kmail-cleanup"],
+    nodes: [
+      { id: "mail-schedule", type: "conduit", position: { x: 80, y: 180 }, data: { kind: "trigger", nodeType: "schedule", label: "Sunday at 18:00", description: "Weekly preview schedule", config: { schedule: "0 18 * * 0", catchUpMinutes: 1440, retryCount: 1 } } },
+      { id: "mail-preview", type: "conduit", position: { x: 420, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Preview KMail cleanup", description: "Write candidates.csv only", config: { source: "~/Dev/kmail-cleanup", mode: "preview" } } },
+      { id: "mail-notify", type: "conduit", position: { x: 760, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Review reminder", description: "Prompt for human review", config: { message: "KMail cleanup preview is ready in ~/Dev/kmail-cleanup/runs" } } },
+    ],
+    edges: [
+      { id: "mail-e1", source: "mail-schedule", target: "mail-preview" },
+      { id: "mail-e2", source: "mail-preview", target: "mail-notify" },
+    ],
+  },
+  {
+    id: "apply-reviewed-kmail-cleanup",
+    name: "Apply reviewed KMail cleanup",
+    description: "Manually move exactly the messages in the latest reviewed preview.",
+    enabled: false,
+    updatedAt: new Date().toISOString(),
+    permissions: ["~/Dev/kmail-cleanup"],
+    nodes: [
+      { id: "mail-apply-trigger", type: "conduit", position: { x: 100, y: 180 }, data: { kind: "trigger", nodeType: "manual", label: "Manual confirmation", description: "Cannot be scheduled", config: {} } },
+      { id: "mail-apply", type: "conduit", position: { x: 440, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Apply reviewed preview", description: "Move exact revalidated messages", config: { source: "~/Dev/kmail-cleanup", mode: "apply_reviewed", reportPath: "" } } },
+      { id: "mail-applied", type: "conduit", position: { x: 780, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Cleanup applied", description: "Show completion", config: { message: "Reviewed KMail cleanup completed" } } },
+    ],
+    edges: [
+      { id: "mail-apply-e1", source: "mail-apply-trigger", target: "mail-apply" },
+      { id: "mail-apply-e2", source: "mail-apply", target: "mail-applied" },
+    ],
+  },
+  {
+    id: "weekly-download-review",
+    name: "Weekly download review",
+    description: "List downloads older than seven days in a dated Markdown review.",
+    enabled: false,
+    updatedAt: new Date().toISOString(),
+    permissions: ["~/Downloads", "~/Documents/Download Reviews"],
+    nodes: [
+      { id: "review-schedule", type: "conduit", position: { x: 50, y: 180 }, data: { kind: "trigger", nodeType: "schedule", label: "Monday at 09:00", description: "Weekly storage hygiene", config: { schedule: "0 9 * * 1", catchUpMinutes: 720 } } },
+      { id: "review-age", type: "conduit", position: { x: 330, y: 180 }, data: { kind: "condition", nodeType: "age", label: "Older than 7 days", description: "Leave recent downloads alone", config: { hours: 168 } } },
+      { id: "review-inventory", type: "conduit", position: { x: 610, y: 180 }, data: { kind: "action", nodeType: "file_inventory", label: "Inventory downloads", description: "Collect path, size, and modified date", config: { source: "~/Downloads", maxFiles: 100 } } },
+      { id: "review-note", type: "conduit", position: { x: 900, y: 180 }, data: { kind: "action", nodeType: "write_text", label: "Write review note", description: "No files are deleted", config: { destination: "~/Documents/Download Reviews/{date}.md", content: "# Download review — {date}\n\nFiles older than seven days:\n\n{input}\n" } } },
+    ],
+    edges: [
+      { id: "review-e1", source: "review-schedule", target: "review-age" },
+      { id: "review-e2", source: "review-age", target: "review-inventory", sourceHandle: "true" },
+      { id: "review-e3", source: "review-inventory", target: "review-note" },
     ],
   },
 ];

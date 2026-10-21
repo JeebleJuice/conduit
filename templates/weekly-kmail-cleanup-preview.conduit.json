@@ -1,0 +1,17 @@
+{
+  "id": "template-weekly-kmail-cleanup-preview",
+  "name": "Weekly KMail cleanup preview",
+  "description": "Create a conservative candidates.csv every Sunday without moving mail.",
+  "enabled": false,
+  "updatedAt": "2026-10-21T00:00:00Z",
+  "permissions": ["~/Dev/kmail-cleanup"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":180},"data":{"kind":"trigger","nodeType":"schedule","label":"Sunday at 18:00","description":"Weekly preview schedule","config":{"schedule":"0 18 * * 0","catchUpMinutes":1440,"retryCount":1}}},
+    {"id":"preview","type":"conduit","position":{"x":420,"y":180},"data":{"kind":"action","nodeType":"kmail_cleanup","label":"Preview KMail cleanup","description":"Write candidates.csv only","config":{"source":"~/Dev/kmail-cleanup","mode":"preview"}}},
+    {"id":"notify","type":"conduit","position":{"x":760,"y":180},"data":{"kind":"action","nodeType":"notification","label":"Review reminder","description":"Prompt for human review","config":{"message":"KMail cleanup preview is ready in ~/Dev/kmail-cleanup/runs"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"preview"},
+    {"id":"e2","source":"preview","target":"notify"}
+  ]
+}

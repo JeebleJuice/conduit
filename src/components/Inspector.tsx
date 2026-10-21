@@ -3,7 +3,7 @@ import type { WorkflowNode } from "../types";
 
 const fieldMap: Record<string, { key: string; label: string; placeholder: string; type?: string }[]> = {
   folder_changed: [{ key: "path", label: "Folder", placeholder: "~/Downloads" }],
-  schedule: [{ key: "schedule", label: "Cron schedule", placeholder: "0 17 * * 5" }, { key: "retryCount", label: "Maximum attempts", placeholder: "1", type: "number" }],
+  schedule: [{ key: "schedule", label: "Cron schedule", placeholder: "0 17 * * 5" }, { key: "catchUpMinutes", label: "Catch-up window (minutes)", placeholder: "0", type: "number" }, { key: "retryCount", label: "Maximum attempts", placeholder: "1", type: "number" }],
   manual: [{ key: "formFields", label: "Form fields (comma separated)", placeholder: "project, week ending" }],
   drive_mounted: [{ key: "mountName", label: "Drive name contains", placeholder: "PHONE" }],
   webhook: [{ key: "port", label: "Loopback port", placeholder: "43821", type: "number" }, { key: "path", label: "Endpoint path", placeholder: "/conduit" }],
@@ -26,6 +26,18 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
   git_summary: [{ key: "repository", label: "Repository", placeholder: "~/Dev/project" }, { key: "sinceDays", label: "Days to include", placeholder: "7", type: "number" }],
   ocr: [{ key: "source", label: "Image or PDF", placeholder: "From trigger" }, { key: "language", label: "OCR language", placeholder: "eng" }],
   document_metadata: [{ key: "source", label: "Document", placeholder: "From trigger" }],
+  organize_downloads: [
+    { key: "documentsRoot", label: "Documents root", placeholder: "~/Documents" },
+    { key: "picturesRoot", label: "Pictures root", placeholder: "~/Pictures" },
+    { key: "videosRoot", label: "Videos root", placeholder: "~/Videos" },
+    { key: "musicRoot", label: "Music root", placeholder: "~/Music" },
+    { key: "archivesRoot", label: "Archives folder", placeholder: "~/Documents/Archives" },
+    { key: "softwareRoot", label: "Software folder", placeholder: "~/Downloads/Software" },
+    { key: "otherRoot", label: "Unclassified folder", placeholder: "~/Downloads/Other" },
+    { key: "maxFiles", label: "Maximum files per run", placeholder: "50", type: "number" },
+  ],
+  file_inventory: [{ key: "source", label: "Folder or file", placeholder: "~/Downloads" }, { key: "maxFiles", label: "Maximum files", placeholder: "100", type: "number" }],
+  kmail_cleanup: [{ key: "source", label: "KMail Cleanup project", placeholder: "~/Dev/kmail-cleanup" }, { key: "mode", label: "Mode", placeholder: "preview" }, { key: "reportPath", label: "Reviewed candidates.csv (apply mode)", placeholder: "~/Dev/kmail-cleanup/runs/.../candidates.csv" }],
 };
 
 export function Inspector({ node, permissions, onChange, onDelete, onClose }: { node?: WorkflowNode; permissions: string[]; onChange: (node: WorkflowNode) => void; onDelete: () => void; onClose: () => void }) {

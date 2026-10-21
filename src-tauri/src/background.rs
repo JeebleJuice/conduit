@@ -52,7 +52,6 @@ fn run_loop(
     let mut watched = HashSet::new();
     let mut workflows = Vec::new();
     let mut startup_fired = HashSet::new();
-    let mut schedule_fired: HashMap<String, String> = HashMap::new();
     let mut fingerprints: HashMap<String, u64> = HashMap::new();
     let mut last_refresh = Instant::now() - Duration::from_secs(30);
     let mut last_reconcile = Instant::now();
@@ -87,8 +86,10 @@ fn run_loop(
         }
 
         for workflow in &workflows {
-            if schedule_is_due(workflow, &mut schedule_fired) {
-                run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock, app, None);
+            if let Some(slot) = due_schedule_slot(workflow, &Local::now()) {
+                if database::claim_schedule(db_path, &workflow.id, &slot).unwrap_or(false) {
+                    run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock, app, None);
+                }
             }
         }
 
@@ -270,26 +271,25 @@ fn recently_ran(cooldowns: &mut HashMap<String, Instant>, workflow_id: &str) -> 
     recent
 }
 
-fn schedule_is_due(workflow: &Workflow, fired: &mut HashMap<String, String>) -> bool {
+fn due_schedule_slot(workflow: &Workflow, now: &chrono::DateTime<Local>) -> Option<String> {
     let Some(trigger) = trigger_node(workflow).filter(|node| node.data.node_type == "schedule") else {
-        return false;
+        return None;
     };
-    let now = Local::now();
-    let minute_key = now.format("%Y-%m-%dT%H:%M").to_string();
-    if fired.get(&workflow.id) == Some(&minute_key) {
-        return false;
-    }
-    let due = if let Some(interval) = number_config(trigger, "intervalMinutes") {
+    if let Some(interval) = number_config(trigger, "intervalMinutes") {
         let minute = now.timestamp().div_euclid(60);
-        interval >= 1.0 && minute % interval.round() as i64 == 0
-    } else {
-        string_config(trigger, "schedule")
-            .is_some_and(|schedule| cron_matches(&schedule, &now))
-    };
-    if due {
-        fired.insert(workflow.id.clone(), minute_key);
+        return (interval >= 1.0 && minute % interval.round() as i64 == 0)
+            .then(|| now.format("%Y-%m-%dT%H:%M").to_string());
     }
-    due
+    let schedule = string_config(trigger, "schedule")?;
+    let catch_up = number_config(trigger, "catchUpMinutes")
+        .unwrap_or(0.0)
+        .round()
+        .clamp(0.0, 10_080.0) as i64;
+    (0..=catch_up).find_map(|offset| {
+        let candidate = *now - chrono::Duration::minutes(offset);
+        cron_matches(&schedule, &candidate)
+            .then(|| candidate.format("%Y-%m-%dT%H:%M").to_string())
+    })
 }
 
 fn cron_matches(expression: &str, now: &chrono::DateTime<Local>) -> bool {
@@ -392,6 +392,39 @@ mod tests {
         let expression = format!("{} {} * * {}", now.minute(), now.hour(), now.weekday().num_days_from_sunday());
         assert!(cron_matches(&expression, &now));
         assert!(!cron_matches("99 99 * * *", &now));
+    }
+
+    #[test]
+    fn scheduled_workflow_can_catch_up_after_downtime() {
+        let now = Local::now();
+        let five_minutes_ago = now - chrono::Duration::minutes(5);
+        let workflow = Workflow {
+            id: "catch-up".into(),
+            name: "Catch up".into(),
+            enabled: true,
+            permissions: vec![],
+            nodes: vec![WorkflowNode {
+                id: "trigger".into(),
+                data: NodeData {
+                    label: "Schedule".into(),
+                    kind: "trigger".into(),
+                    node_type: "schedule".into(),
+                    config: HashMap::from([
+                        ("schedule".into(), serde_json::Value::String(format!(
+                            "{} {} * * *",
+                            five_minutes_ago.minute(),
+                            five_minutes_ago.hour()
+                        ))),
+                        ("catchUpMinutes".into(), serde_json::Value::from(10)),
+                    ]),
+                },
+            }],
+            edges: vec![],
+        };
+        assert_eq!(
+            due_schedule_slot(&workflow, &now),
+            Some(five_minutes_ago.format("%Y-%m-%dT%H:%M").to_string())
+        );
     }
 
     #[test]

@@ -1,0 +1,17 @@
+{
+  "id": "template-smart-download-organizer",
+  "name": "Smart download organizer",
+  "description": "Route completed downloads using type, filename, and bounded content inspection.",
+  "enabled": false,
+  "updatedAt": "2026-10-21T00:00:00Z",
+  "permissions": ["~/Downloads", "~/Documents", "~/Pictures", "~/Videos", "~/Music"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":180},"data":{"kind":"trigger","nodeType":"folder_changed","label":"Downloads changed","description":"Watch completed browser downloads","config":{"path":"~/Downloads"}}},
+    {"id":"organize","type":"conduit","position":{"x":420,"y":180},"data":{"kind":"action","nodeType":"organize_downloads","label":"Classify and move","description":"Use type, filename, and content rules","config":{"documentsRoot":"~/Documents","picturesRoot":"~/Pictures","videosRoot":"~/Videos","musicRoot":"~/Music","archivesRoot":"~/Documents/Archives","softwareRoot":"~/Downloads/Software","otherRoot":"~/Downloads/Other","maxFiles":50}}},
+    {"id":"notify","type":"conduit","position":{"x":760,"y":180},"data":{"kind":"action","nodeType":"notification","label":"Sorting complete","description":"Show completion","config":{"message":"New downloads were organized"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"organize"},
+    {"id":"e2","source":"organize","target":"notify"}
+  ]
+}

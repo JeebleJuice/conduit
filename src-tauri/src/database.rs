@@ -65,11 +65,32 @@ pub(crate) fn initialize(path: &Path) -> Result<(), String> {
                 undone INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (run_id, sequence)
             );
+            CREATE TABLE IF NOT EXISTS schedule_firings (
+                workflow_id TEXT NOT NULL,
+                scheduled_minute TEXT NOT NULL,
+                claimed_at TEXT NOT NULL,
+                PRIMARY KEY (workflow_id, scheduled_minute)
+            );
             CREATE INDEX IF NOT EXISTS runs_workflow_started
                 ON runs(workflow_id, started_at DESC);",
         )
         .map_err(|error| error.to_string())?;
     recover_interrupted_runs(&connection)
+}
+
+pub(crate) fn claim_schedule(path: &Path, workflow_id: &str, scheduled_minute: &str) -> Result<bool, String> {
+    let connection = open(path)?;
+    let inserted = connection
+        .execute(
+            "INSERT OR IGNORE INTO schedule_firings (workflow_id,scheduled_minute,claimed_at) VALUES (?1,?2,?3)",
+            params![workflow_id, scheduled_minute, Utc::now().to_rfc3339()],
+        )
+        .map_err(|error| error.to_string())?;
+    let _ = connection.execute(
+        "DELETE FROM schedule_firings WHERE julianday(claimed_at) < julianday('now', '-35 days')",
+        [],
+    );
+    Ok(inserted == 1)
 }
 
 fn recover_interrupted_runs(connection: &Connection) -> Result<(), String> {
@@ -484,5 +505,17 @@ mod tests {
         assert_eq!(status.state, "needs_preview");
         assert!(!is_approved(&path, &workflow).unwrap());
         let _ = std::fs::remove_file(path);
+    }
+
+
+    #[test]
+    fn schedule_slots_are_claimed_only_once() {
+        let directory = std::env::temp_dir().join(format!("conduit-schedule-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("runtime.sqlite3");
+        initialize(&path).unwrap();
+        assert!(claim_schedule(&path, "workflow", "2026-10-21T18:00").unwrap());
+        assert!(!claim_schedule(&path, "workflow", "2026-10-21T18:00").unwrap());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

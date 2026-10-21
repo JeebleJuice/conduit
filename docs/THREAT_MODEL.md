@@ -22,6 +22,9 @@ Conduit can read and modify user-approved folders, issue network requests, call 
 | Crash ambiguity | Active runs are journaled before effects begin. A stale active run is recorded as failed during recovery; success is never inferred. |
 | Misleading undo | Only journalled reversible operations expose Undo. Conflicts stop reversal rather than overwriting newer files. Removed copies go to desktop trash. |
 | Malicious imported workflow | Imports start disabled and require explicit permissions plus a successful dry run. |
+| Download misclassification | Content reads are bounded, partial-download suffixes are ignored, moves remain collision-safe and undoable, and the workflow starts disabled. |
+| Unattended mail deletion | The KMail integration never deletes mail. Scheduled mode can only create a review report; applying that report is rejected unless the workflow trigger is manual, and the underlying tool revalidates IDs before moving mail. |
+| Duplicate catch-up run | Each scheduled minute is claimed atomically in SQLite before execution, so restarts cannot replay the same slot. Catch-up is opt-in and capped at seven days. |
 
 ## Accepted limitations
 

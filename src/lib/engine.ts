@@ -3,13 +3,25 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
+const BUILTINS_KEY = "conduit.builtins.v2";
 
 export const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 export function loadWorkflows(fallback: Workflow[]): Workflow[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : fallback;
+    if (!saved) {
+      localStorage.setItem(BUILTINS_KEY, "installed");
+      return fallback;
+    }
+    const parsed = JSON.parse(saved) as Workflow[];
+    if (localStorage.getItem(BUILTINS_KEY) !== "installed") {
+      const ids = new Set(parsed.map((workflow) => workflow.id));
+      const additions = fallback.filter((workflow) => !ids.has(workflow.id));
+      localStorage.setItem(BUILTINS_KEY, "installed");
+      return [...parsed, ...additions];
+    }
+    return parsed;
   } catch {
     return fallback;
   }

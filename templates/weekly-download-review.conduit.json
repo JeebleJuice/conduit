@@ -1,0 +1,19 @@
+{
+  "id": "template-weekly-download-review",
+  "name": "Weekly download review",
+  "description": "Write a Markdown inventory of downloads older than seven days without deleting them.",
+  "enabled": false,
+  "updatedAt": "2026-10-21T00:00:00Z",
+  "permissions": ["~/Downloads", "~/Documents/Download Reviews"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":50,"y":180},"data":{"kind":"trigger","nodeType":"schedule","label":"Monday at 09:00","description":"Weekly storage hygiene","config":{"schedule":"0 9 * * 1","catchUpMinutes":720}}},
+    {"id":"age","type":"conduit","position":{"x":330,"y":180},"data":{"kind":"condition","nodeType":"age","label":"Older than 7 days","description":"Leave recent downloads alone","config":{"hours":168}}},
+    {"id":"inventory","type":"conduit","position":{"x":610,"y":180},"data":{"kind":"action","nodeType":"file_inventory","label":"Inventory downloads","description":"Collect path, size, and modified date","config":{"source":"~/Downloads","maxFiles":100}}},
+    {"id":"note","type":"conduit","position":{"x":900,"y":180},"data":{"kind":"action","nodeType":"write_text","label":"Write review note","description":"No files are deleted","config":{"destination":"~/Documents/Download Reviews/{date}.md","content":"# Download review — {date}\n\nFiles older than seven days:\n\n{input}\n"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"age"},
+    {"id":"e2","source":"age","target":"inventory","sourceHandle":"true"},
+    {"id":"e3","source":"inventory","target":"note"}
+  ]
+}

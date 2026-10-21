@@ -5,12 +5,13 @@ use std::{
     io::Read,
     path::Path,
     process::{Command, Stdio},
+    thread,
     time::Duration,
 };
 use zip::{write::SimpleFileOptions, ZipArchive, ZipWriter};
 
 pub(crate) fn capability_statuses() -> Vec<CapabilityStatus> {
-    [
+    let mut statuses: Vec<CapabilityStatus> = [
         ("git", "Git summaries", "git", "--version"),
         ("ffmpeg", "Media conversion", "ffmpeg", "-version"),
         ("tesseract", "OCR", "tesseract", "--version"),
@@ -34,7 +35,49 @@ pub(crate) fn capability_statuses() -> Vec<CapabilityStatus> {
             },
         }
     })
-    .collect()
+    .collect();
+    let cleanup_root = dirs::home_dir().map(|home| home.join("Dev/kmail-cleanup"));
+    let cleanup = cleanup_root.as_ref().map(|root| root.join("sort_inbox.py"));
+    let mover = cleanup_root.as_ref().map(|root| root.join("kmail_cleanup_move"));
+    let missing: Vec<&str> = [
+        (!cleanup.as_ref().is_some_and(|path| path.is_file())).then_some("sort_inbox.py"),
+        (!mover.as_ref().is_some_and(|path| path.is_file())).then_some("kmail_cleanup_move"),
+        (!on_path("akonadictl")).then_some("akonadictl"),
+        (!on_path("mariadb")).then_some("mariadb"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let available = missing.is_empty();
+    statuses.push(CapabilityStatus {
+        id: "kmail-cleanup".into(),
+        label: "KMail Cleanup".into(),
+        available,
+        detail: if available {
+            cleanup.unwrap().display().to_string()
+        } else {
+            format!("Missing: {}", missing.join(", "))
+        },
+    });
+    statuses
+}
+
+fn on_path(command: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(command).is_file())
+    })
+}
+
+fn expand_user_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    if raw == "~" {
+        return dirs::home_dir().ok_or_else(|| "Home directory is unavailable".into());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return dirs::home_dir()
+            .map(|home| home.join(rest))
+            .ok_or_else(|| "Home directory is unavailable".into());
+    }
+    Ok(std::path::PathBuf::from(raw))
 }
 
 fn first_line(value: &str) -> String {
@@ -128,6 +171,76 @@ pub(crate) fn run(
             append_context(context, &output);
             Ok(true)
         }
+        "file_inventory" => {
+            let source = Path::new(required(&operation.source, "File inventory needs a source")?);
+            let metadata = source.metadata().map_err(|error| error.to_string())?;
+            let modified = metadata
+                .modified()
+                .ok()
+                .map(chrono::DateTime::<chrono::Local>::from)
+                .map(|date| date.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown".into());
+            append_context(
+                context,
+                &format!("- `{}` — {} — modified {modified}", source.display(), human_size(metadata.len())),
+            );
+            Ok(true)
+        }
+        "kmail_cleanup" => {
+            let project = Path::new(required(&operation.source, "KMail Cleanup needs its project directory")?);
+            let canonical_project = project.canonicalize().map_err(|error| error.to_string())?;
+            let expected_project = dirs::home_dir()
+                .map(|home| home.join("Dev/kmail-cleanup"))
+                .ok_or("Home directory is unavailable")?
+                .canonicalize()
+                .map_err(|error| format!("Expected KMail Cleanup project is unavailable: {error}"))?;
+            if canonical_project != expected_project {
+                return Err("KMail Cleanup is restricted to ~/Dev/kmail-cleanup".into());
+            }
+            let script = canonical_project.join("sort_inbox.py");
+            let canonical_script = script.canonicalize().map_err(|error| format!("KMail Cleanup script is unavailable: {error}"))?;
+            if canonical_script.parent() != Some(canonical_project.as_path())
+                || canonical_script.file_name().and_then(|name| name.to_str()) != Some("sort_inbox.py")
+            {
+                return Err("KMail Cleanup script resolved outside its configured project".into());
+            }
+            let mode = node
+                .data
+                .config
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("preview");
+            let arguments: Vec<String> = match mode {
+                "preview" => Vec::new(),
+                "apply_reviewed" => {
+                    let report = node
+                        .data
+                        .config
+                        .get("reportPath")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or("Paste the exact reviewed candidates.csv path before applying KMail cleanup")?;
+                    let report = expand_user_path(report)?
+                        .canonicalize()
+                        .map_err(|error| format!("Cannot open reviewed report: {error}"))?;
+                    let runs = canonical_project
+                        .join("runs")
+                        .canonicalize()
+                        .map_err(|error| format!("KMail Cleanup runs directory is unavailable: {error}"))?;
+                    if !report.starts_with(&runs)
+                        || report.file_name().and_then(|name| name.to_str()) != Some("candidates.csv")
+                    {
+                        return Err("The reviewed report must be a candidates.csv inside the KMail Cleanup runs directory".into());
+                    }
+                    vec!["--apply".into(), "--report".into(), report.display().to_string()]
+                }
+                _ => return Err("KMail Cleanup mode must be preview or apply_reviewed".into()),
+            };
+            ensure_akonadi()?;
+            let output = external_path(&canonical_script, &arguments)?;
+            append_context(context, &output);
+            Ok(true)
+        }
         "http_request" => {
             let url = node
                 .data
@@ -192,6 +305,39 @@ pub(crate) fn run(
     }
 }
 
+fn ensure_akonadi() -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    return Err("KMail Cleanup is available only on Linux".into());
+
+    #[cfg(target_os = "linux")]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })));
+        let socket = runtime.join("akonadi/mysql.socket");
+        if socket.exists() {
+            return Ok(());
+        }
+        let output = Command::new("akonadictl")
+            .arg("start")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| format!("Cannot start Akonadi: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Cannot start Akonadi: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        }
+        for _ in 0..40 {
+            if socket.exists() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        Err("Akonadi did not become ready within 10 seconds".into())
+    }
+}
+
 fn required<'a>(value: &'a Option<String>, message: &str) -> Result<&'a str, String> {
     value.as_deref().ok_or_else(|| message.to_owned())
 }
@@ -201,6 +347,18 @@ fn append_context(context: &mut String, value: &str) {
         context.push_str("\n\n");
     }
     context.push_str(value.trim());
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn external(command: &str, arguments: &[&str]) -> Result<String, String> {
@@ -217,6 +375,23 @@ fn external(command: &str, arguments: &[&str]) -> Result<String, String> {
         })?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn external_path(command: &Path, arguments: &[String]) -> Result<String, String> {
+    let output = Command::new(command)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if message.is_empty() {
+            format!("{} exited with {}", command.display(), output.status)
+        } else {
+            message
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -334,7 +509,7 @@ pub(crate) fn undo_run(db_path: &Path, run_id: &str) -> Result<usize, String> {
 
 fn undo_operation(db_path: &Path, run_id: &str, operation: &ReversibleOperation) -> Result<(), String> {
     match operation.action.as_str() {
-        "move" | "rename" => {
+        "move" | "rename" | "organize_downloads" => {
             let source = operation.source.as_deref().ok_or("Undo record has no original path")?;
             let destination = operation.destination.as_deref().ok_or("Undo record has no resulting path")?;
             if Path::new(source).exists() {

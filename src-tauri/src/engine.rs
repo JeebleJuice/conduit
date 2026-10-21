@@ -1,4 +1,4 @@
-use crate::{actions, database};
+use crate::{actions, database, downloads};
 use crate::models::{EngineResult, PreviewOperation, RunRecord, Workflow, WorkflowNode};
 use chrono::Utc;
 use serde_json::Value;
@@ -132,7 +132,8 @@ fn assert_allowed(path: &Path, permissions: &[PathBuf]) -> Result<PathBuf, Strin
 }
 
 fn expand_template(template: &str, source: Option<&Path>) -> String {
-    let date = Utc::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Local::now();
+    let date = now.format("%Y-%m-%d").to_string();
     let name = source
         .and_then(Path::file_name)
         .map(|value| value.to_string_lossy().into_owned())
@@ -147,6 +148,8 @@ fn expand_template(template: &str, source: Option<&Path>) -> String {
         .unwrap_or_default();
     template
         .replace("{date}", &date)
+        .replace("{year}", &now.format("%Y").to_string())
+        .replace("{month}", &now.format("%m").to_string())
         .replace("{name}", &name)
         .replace("{stem}", &stem)
         .replace("{ext}", &extension)
@@ -199,7 +202,17 @@ fn candidate_files(
     db_path: &Path,
     background: bool,
 ) -> Result<Vec<PathBuf>, String> {
-    let explicit = workflow.nodes.iter().find_map(|node| string_config(node, "source"));
+    let explicit = workflow
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.data.node_type.as_str(),
+                "copy" | "move" | "rename" | "checksum" | "trash" | "compress" | "extract" |
+                "media_convert" | "ocr" | "document_metadata" | "organize_downloads" | "file_inventory"
+            )
+        })
+        .find_map(|node| string_config(node, "source"));
     let folder = trigger_node(workflow)
         .filter(|node| node.data.node_type == "folder_changed")
         .and_then(|node| string_config(node, "path"));
@@ -213,7 +226,19 @@ fn candidate_files(
 
     let mut candidates = if let Some(source) = explicit {
         let path = assert_allowed(&expand_home(&source)?, permissions)?;
-        path.is_file().then_some(path).into_iter().collect()
+        if path.is_file() {
+            vec![path]
+        } else if path.is_dir() {
+            fs::read_dir(&path)
+                .map_err(|error| format!("Cannot read {}: {error}", path.display()))?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|entry| entry.is_file())
+                .take(max_files * 2)
+                .collect()
+        } else {
+            Vec::new()
+        }
     } else if let Some(paths) = event_paths {
         paths
             .iter()
@@ -290,7 +315,7 @@ fn plan_operations(
         let uses_files = matches!(
             node.data.node_type.as_str(),
             "copy" | "move" | "rename" | "checksum" | "trash" | "compress" | "extract" |
-            "media_convert" | "ocr" | "document_metadata"
+            "media_convert" | "ocr" | "document_metadata" | "organize_downloads" | "file_inventory"
         );
         let sources: Vec<PathBuf> = if uses_files && !files.is_empty() {
             files.to_vec()
@@ -322,9 +347,16 @@ fn plan_operations(
                     "compress" => destination.clone().map(collision_safe),
                     "extract" => destination.clone(),
                     "checksum" => Some(collision_safe(PathBuf::from(format!("{}.sha256", source.display())))),
+                    "organize_downloads" => downloads::destination(&source, node)?
+                        .map(|directory| assert_allowed(&directory, permissions))
+                        .transpose()?
+                        .map(|directory| collision_safe(directory.join(source.file_name().unwrap_or_default()))),
                     _ => None,
                 };
-                if matches!(node.data.node_type.as_str(), "copy" | "move" | "rename" | "media_convert" | "compress") {
+                if node.data.node_type == "organize_downloads" && target.is_none() {
+                    continue;
+                }
+                if matches!(node.data.node_type.as_str(), "copy" | "move" | "rename" | "media_convert" | "compress" | "organize_downloads") {
                     if let Some(target) = &target {
                         routed.insert(original_source.clone(), target.clone());
                         routed.insert(source.clone(), target.clone());
@@ -337,7 +369,7 @@ fn plan_operations(
                     source: Some(source.display().to_string()),
                     destination: target.map(|path| path.display().to_string()),
                     warning: match node.data.node_type.as_str() {
-                        "move" => Some("Original file will be moved".into()),
+                        "move" | "organize_downloads" => Some("Original file will be moved".into()),
                         "trash" => Some("File will be sent to desktop trash".into()),
                         "http_request" => Some("External effects cannot be undone".into()),
                         _ => None,
@@ -355,7 +387,14 @@ fn plan_operations(
                 } else {
                     destination.map(|path| path.display().to_string())
                 },
-                warning: (node.data.node_type == "http_request").then(|| "External effects cannot be undone".into()),
+                warning: match node.data.node_type.as_str() {
+                    "http_request" => Some("External effects cannot be undone".into()),
+                    "kmail_cleanup" if string_config(node, "mode").as_deref() == Some("apply_reviewed") => {
+                        Some("Moves only the latest reviewed KMail preview; mail is not deleted".into())
+                    }
+                    "kmail_cleanup" => Some("Creates a review report; no mail is moved".into()),
+                    _ => None,
+                },
             });
         }
     }
@@ -412,7 +451,7 @@ fn perform_operations(
                     database::record_operation(db_path, run_id, sequence, "copy", Some(source), Some(destination))?;
                 }
             }
-            "move" => {
+            "move" | "organize_downloads" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
                     if let Some(parent) = Path::new(destination).parent() {
                         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -423,7 +462,7 @@ fn perform_operations(
                             fs::remove_file(source)
                         })
                         .map_err(|error| error.to_string())?;
-                    database::record_operation(db_path, run_id, sequence, "move", Some(source), Some(destination))?;
+                    database::record_operation(db_path, run_id, sequence, &operation.action, Some(source), Some(destination))?;
                 }
             }
             "rename" => {
@@ -476,6 +515,12 @@ pub(crate) fn execute(
 ) -> Result<EngineResult, String> {
     let started = Instant::now();
     let ordered = validate_graph(workflow)?;
+    if workflow.nodes.iter().any(|node| {
+        node.data.node_type == "kmail_cleanup"
+            && string_config(node, "mode").as_deref() == Some("apply_reviewed")
+    }) && trigger_node(workflow).is_none_or(|node| node.data.node_type != "manual") {
+        return Err("Applying a KMail cleanup report is allowed only from a manual workflow".into());
+    }
     let permissions: Vec<PathBuf> = workflow
         .permissions
         .iter()
@@ -487,7 +532,7 @@ pub(crate) fn execute(
                 node.data.node_type.as_str(),
                 "copy" | "move" | "rename" | "write_text" | "create_directory" | "checksum" |
                 "trash" | "compress" | "extract" | "media_convert" | "git_summary" | "ocr" |
-                "document_metadata"
+                "document_metadata" | "organize_downloads" | "file_inventory" | "kmail_cleanup"
             )
         })
     {
@@ -511,7 +556,7 @@ pub(crate) fn execute(
         status: if dry_run { "preview".into() } else { "running".into() },
         files: files.len(),
         reversible: !dry_run && operations.iter().all(|operation| {
-            matches!(operation.action.as_str(), "copy" | "move" | "rename" | "create_directory" | "write_text" | "checksum" | "compress" | "media_convert")
+            matches!(operation.action.as_str(), "copy" | "move" | "rename" | "organize_downloads" | "create_directory" | "write_text" | "checksum" | "compress" | "media_convert")
         }),
         message: String::new(),
     };
@@ -561,6 +606,7 @@ pub(crate) fn execute(
         "manual", "folder_changed", "schedule", "startup", "extension", "file_size", "age", "exists",
         "create_directory", "copy", "move", "rename", "write_text", "checksum", "notification", "trash",
         "compress", "extract", "http_request", "media_convert", "git_summary", "ocr", "document_metadata",
+        "organize_downloads", "file_inventory", "kmail_cleanup",
     ];
     let node_statuses = ordered
         .into_iter()
@@ -589,6 +635,52 @@ mod tests {
         let original = directory.join("report.pdf");
         fs::write(&original, b"one").unwrap();
         assert_eq!(collision_safe(original), directory.join("report-2.pdf"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn kmail_apply_cannot_be_scheduled() {
+        let directory = std::env::temp_dir().join(format!("conduit-mail-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let database_path = directory.join("runtime.sqlite3");
+        database::initialize(&database_path).unwrap();
+        let workflow = Workflow {
+            id: "unsafe-mail-schedule".into(),
+            name: "Unsafe mail schedule".into(),
+            enabled: false,
+            permissions: vec![directory.display().to_string()],
+            nodes: vec![
+                WorkflowNode {
+                    id: "trigger".into(),
+                    data: crate::models::NodeData {
+                        label: "Schedule".into(), kind: "trigger".into(), node_type: "schedule".into(),
+                        config: HashMap::from([("schedule".into(), Value::String("0 18 * * 0".into()))]),
+                    },
+                },
+                WorkflowNode {
+                    id: "action".into(),
+                    data: crate::models::NodeData {
+                        label: "Apply mail".into(), kind: "action".into(), node_type: "kmail_cleanup".into(),
+                        config: HashMap::from([
+                            ("source".into(), Value::String(directory.display().to_string())),
+                            ("mode".into(), Value::String("apply_reviewed".into())),
+                        ]),
+                    },
+                },
+            ],
+            edges: vec![crate::models::WorkflowEdge { source: "trigger".into(), target: "action".into() }],
+        };
+        let result = execute(
+            &workflow,
+            true,
+            &database_path,
+            "manual",
+            None,
+            false,
+            &AtomicBool::new(false),
+            None,
+        );
+        assert_eq!(result.unwrap_err(), "Applying a KMail cleanup report is allowed only from a manual workflow");
         fs::remove_dir_all(directory).unwrap();
     }
 

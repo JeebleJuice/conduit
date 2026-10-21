@@ -28,7 +28,10 @@ The project now covers the original release stages and advanced-node roadmap:
 - HTTPS requests with OS-keyring bearer secrets, timeouts, redirect limits, and response limits;
 - FFmpeg conversion, Git summaries, Tesseract OCR, and ExifTool metadata nodes;
 - user-defined manual-run form values;
-- importable templates for OCR, Git notes, webhooks, and phone-photo imports;
+- content-aware download routing by signature, extension, filename, and bounded document content;
+- a constrained KMail Cleanup integration with scheduled preview and manual-only reviewed apply;
+- durable schedule claims and optional catch-up windows after downtime;
+- importable templates for downloads, KMail, screenshot filing, OCR, Git notes, webhooks, and phone-photo imports;
 - Linux, Windows, and macOS release configuration with draft GitHub releases.
 
 Optional executable nodes are capability-checked. A missing program produces a visible failed run instead of silently skipping the node.
@@ -85,6 +88,7 @@ curl -X POST http://127.0.0.1:43821/conduit --data 'A local automation note'
 HTTP bearer secrets are stored through the settings button in the operating-system keyring. Workflow files contain only the secret name.
 
 Import ready-made workflows from [`templates/`](templates). Security decisions and recovery procedures are documented in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) and [`docs/RECOVERY.md`](docs/RECOVERY.md).
+The built-in desktop automations and their one-time activation steps are documented in [`docs/AUTOMATIONS.md`](docs/AUTOMATIONS.md).
 
 ## Checks
 

@@ -1,6 +1,7 @@
 mod actions;
 mod background;
 mod database;
+mod downloads;
 mod engine;
 mod models;
 

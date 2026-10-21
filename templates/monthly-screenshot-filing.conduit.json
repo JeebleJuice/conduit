@@ -1,0 +1,19 @@
+{
+  "id": "template-monthly-screenshot-filing",
+  "name": "File screenshots by month",
+  "description": "Move screenshots into year/month folders without overwriting existing files.",
+  "enabled": false,
+  "updatedAt": "2026-10-21T00:00:00Z",
+  "permissions": ["~/Pictures/Screenshots"],
+  "nodes": [
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":180},"data":{"kind":"trigger","nodeType":"folder_changed","label":"Screenshot created","description":"Watch the screenshot folder","config":{"path":"~/Pictures/Screenshots"}}},
+    {"id":"image","type":"conduit","position":{"x":360,"y":180},"data":{"kind":"condition","nodeType":"extension","label":"PNG screenshot","description":"Match PNG files","config":{"extension":".png"}}},
+    {"id":"move","type":"conduit","position":{"x":650,"y":180},"data":{"kind":"action","nodeType":"move","label":"File by month","description":"Use local year/month folders","config":{"destination":"~/Pictures/Screenshots/{year}/{month}","maxFiles":25}}},
+    {"id":"notify","type":"conduit","position":{"x":940,"y":180},"data":{"kind":"action","nodeType":"notification","label":"Screenshot filed","description":"Show completion","config":{"message":"Screenshot filed by month"}}}
+  ],
+  "edges": [
+    {"id":"e1","source":"trigger","target":"image"},
+    {"id":"e2","source":"image","target":"move","sourceHandle":"true"},
+    {"id":"e3","source":"move","target":"notify"}
+  ]
+}
