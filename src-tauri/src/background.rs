@@ -4,7 +4,7 @@ use crate::{
     models::{WorkerHealth, Workflow},
 };
 use chrono::{Datelike, Local, Timelike, Utc};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::AppHandle;
 use std::{
     collections::{HashMap, HashSet},
@@ -138,7 +138,7 @@ fn run_loop(
         }
 
         match event_rx.recv_timeout(Duration::from_millis(500)) {
-            Ok(Ok(event)) => {
+            Ok(Ok(event)) if is_relevant_folder_event(&event) => {
                 for workflow in &workflows {
                     let Some(folder) = watched_folder(workflow) else { continue };
                     let matching: Vec<PathBuf> = event
@@ -153,6 +153,7 @@ fn run_loop(
                     run_with_retries(db_path, workflow, "folder change", Some(&matching), cancelled, execution_lock, app, None);
                 }
             }
+            Ok(Ok(_)) => {}
             Ok(Err(error)) => set_error(health, format!("Filesystem watcher: {error}")),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 set_error(health, "Filesystem watcher stopped unexpectedly".into());
@@ -180,6 +181,13 @@ fn run_loop(
     if let Ok(mut value) = health.lock() {
         value.running = false;
     }
+}
+
+fn is_relevant_folder_event(event: &Event) -> bool {
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
+    )
 }
 
 fn refresh_webhooks(workflows: &[Workflow], listeners: &mut HashMap<String, TcpListener>) {
@@ -392,6 +400,19 @@ mod tests {
         let expression = format!("{} {} * * {}", now.minute(), now.hour(), now.weekday().num_days_from_sunday());
         assert!(cron_matches(&expression, &now));
         assert!(!cron_matches("99 99 * * *", &now));
+    }
+
+    #[test]
+    fn folder_watcher_ignores_reads_but_accepts_new_or_completed_files() {
+        assert!(!is_relevant_folder_event(&Event::new(EventKind::Access(
+            notify::event::AccessKind::Close(notify::event::AccessMode::Read),
+        ))));
+        assert!(is_relevant_folder_event(&Event::new(EventKind::Create(
+            notify::event::CreateKind::File,
+        ))));
+        assert!(is_relevant_folder_event(&Event::new(EventKind::Modify(
+            ModifyKind::Name(notify::event::RenameMode::To),
+        ))));
     }
 
     #[test]

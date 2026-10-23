@@ -376,7 +376,7 @@ fn plan_operations(
                     },
                 });
             }
-        } else {
+        } else if !uses_files {
             operations.push(PreviewOperation {
                 node_id: node.id.clone(),
                 node_label: node.data.label.clone(),
@@ -400,6 +400,16 @@ fn plan_operations(
                 },
             });
         }
+    }
+    let has_download_organizer = workflow
+        .nodes
+        .iter()
+        .any(|node| node.data.node_type == "organize_downloads");
+    let organized_download = operations
+        .iter()
+        .any(|operation| operation.action == "organize_downloads");
+    if has_download_organizer && !organized_download {
+        operations.retain(|operation| operation.action != "notification");
     }
     Ok(operations)
 }
@@ -648,6 +658,55 @@ mod tests {
         assert!(!rendered.contains("{date}"));
         assert!(!rendered.contains("{year}"));
         assert!(!rendered.contains("{month}"));
+    }
+
+    #[test]
+    fn empty_download_organizer_plans_no_moves_or_notification() {
+        let workflow = Workflow {
+            id: "empty-downloads".into(),
+            name: "Empty downloads".into(),
+            enabled: true,
+            permissions: vec![],
+            nodes: vec![
+                WorkflowNode {
+                    id: "trigger".into(),
+                    data: crate::models::NodeData {
+                        label: "Downloads changed".into(),
+                        kind: "trigger".into(),
+                        node_type: "folder_changed".into(),
+                        config: HashMap::new(),
+                    },
+                },
+                WorkflowNode {
+                    id: "organize".into(),
+                    data: crate::models::NodeData {
+                        label: "Organize".into(),
+                        kind: "action".into(),
+                        node_type: "organize_downloads".into(),
+                        config: HashMap::new(),
+                    },
+                },
+                WorkflowNode {
+                    id: "notify".into(),
+                    data: crate::models::NodeData {
+                        label: "Done".into(),
+                        kind: "action".into(),
+                        node_type: "notification".into(),
+                        config: HashMap::from([(
+                            "message".into(),
+                            serde_json::Value::String("Downloads organized".into()),
+                        )]),
+                    },
+                },
+            ],
+            edges: vec![
+                crate::models::WorkflowEdge { source: "trigger".into(), target: "organize".into() },
+                crate::models::WorkflowEdge { source: "organize".into(), target: "notify".into() },
+            ],
+        };
+        let ordered = validate_graph(&workflow).unwrap();
+        let operations = plan_operations(&workflow, &ordered, &[], &[]).unwrap();
+        assert!(operations.is_empty());
     }
 
     #[test]
