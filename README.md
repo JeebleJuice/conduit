@@ -77,6 +77,8 @@ Conduit expands and resolves every filesystem path in the Rust process. A resolv
 
 Run data, enabled workflow definitions, approvals, and processed-file fingerprints live in the platform application-data directory as `conduit.sqlite3`. Workflow drafts also stay local in the webview's local storage. Closing the window hides Conduit to the system tray; use **Quit Conduit** from the tray menu to stop the background engine.
 
+Pass `--background` to start the scheduler and tray icon without opening the main window. A second normal launch focuses the already-running instance instead of creating a duplicate worker. On Linux, this mode can be used from an XDG login entry such as `~/.config/autostart/conduit.desktop`.
+
 Schedules use the standard five fields `minute hour day-of-month month weekday`. For example, `0 17 * * 5` runs Friday at 17:00 in the computer's local timezone.
 
 Local webhooks bind only to `127.0.0.1`. For the bundled template:

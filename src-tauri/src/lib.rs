@@ -125,9 +125,18 @@ pub(crate) fn send_notifications(app: &AppHandle, result: &EngineResult) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let start_hidden = std::env::args_os().any(|argument| argument == "--background");
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _working_directory| {
+            if !arguments.iter().any(|argument| argument == "--background") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             let data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("conduit.sqlite3");
@@ -161,6 +170,12 @@ pub fn run() {
                 _ => {}
             })
             .build(app)?;
+            if !start_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show()?;
+                    window.set_focus()?;
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
