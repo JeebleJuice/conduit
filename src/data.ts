@@ -70,15 +70,15 @@ export const initialWorkflows: Workflow[] = [
   },
   {
     id: "weekly-kmail-cleanup-preview",
-    name: "Weekly KMail cleanup preview",
-    description: "Create a conservative review CSV every Sunday; never move mail automatically.",
+    name: "Weekly KMail cleanup",
+    description: "Preview conservative candidates every Sunday, then move that exact set to Cleanup Review.",
     enabled: false,
     updatedAt: new Date().toISOString(),
     permissions: ["~/Dev/kmail-cleanup"],
     nodes: [
-      { id: "mail-schedule", type: "conduit", position: { x: 80, y: 180 }, data: { kind: "trigger", nodeType: "schedule", label: "Sunday at 18:00", description: "Weekly preview schedule", config: { schedule: "0 18 * * 0", catchUpMinutes: 1440, retryCount: 1 } } },
-      { id: "mail-preview", type: "conduit", position: { x: 420, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Preview KMail cleanup", description: "Write candidates.csv only", config: { source: "~/Dev/kmail-cleanup", mode: "preview" } } },
-      { id: "mail-notify", type: "conduit", position: { x: 760, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Review reminder", description: "Prompt for human review", config: { message: "KMail cleanup preview is ready in ~/Dev/kmail-cleanup/runs" } } },
+      { id: "mail-schedule", type: "conduit", position: { x: 80, y: 180 }, data: { kind: "trigger", nodeType: "schedule", label: "Sunday at 18:00", description: "Weekly cleanup schedule", config: { schedule: "0 18 * * 0", catchUpMinutes: 1440, retryCount: 1 } } },
+      { id: "mail-preview", type: "conduit", position: { x: 420, y: 180 }, data: { kind: "action", nodeType: "kmail_cleanup", label: "Preview and file KMail", description: "Create candidates.csv, then move that exact set to Cleanup Review", config: { source: "~/Dev/kmail-cleanup", mode: "preview_and_apply" } } },
+      { id: "mail-notify", type: "conduit", position: { x: 760, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Cleanup complete", description: "Show completion", config: { message: "KMail cleanup moved its candidates to Cleanup Review" } } },
     ],
     edges: [
       { id: "mail-e1", source: "mail-schedule", target: "mail-preview" },

@@ -34,4 +34,16 @@ describe("workflow validation", () => {
       (node) => node.data.nodeType === "git_summary",
     )).toBe(true);
   });
+
+  it("upgrades the scheduled KMail preview to preview and apply", () => {
+    const current = structuredClone(initialWorkflows.find((workflow) => workflow.id === "weekly-kmail-cleanup-preview")!);
+    const cleanup = current.nodes.find((node) => node.data.nodeType === "kmail_cleanup")!;
+    cleanup.data.config.mode = "preview";
+    current.enabled = true;
+    const [upgraded] = upgradeBuiltins([current], initialWorkflows);
+    expect(upgraded.enabled).toBe(false);
+    expect(upgraded.name).toBe("Weekly KMail cleanup");
+    expect(upgraded.nodes.find((node) => node.data.nodeType === "kmail_cleanup")?.data.config.mode)
+      .toBe("preview_and_apply");
+  });
 });

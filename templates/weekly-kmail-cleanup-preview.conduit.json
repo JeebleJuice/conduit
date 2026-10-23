@@ -1,14 +1,14 @@
 {
   "id": "template-weekly-kmail-cleanup-preview",
-  "name": "Weekly KMail cleanup preview",
-  "description": "Create a conservative candidates.csv every Sunday without moving mail.",
+  "name": "Weekly KMail cleanup",
+  "description": "Create conservative candidates every Sunday, then move that exact set to Cleanup Review.",
   "enabled": false,
   "updatedAt": "2026-10-21T00:00:00Z",
   "permissions": ["~/Dev/kmail-cleanup"],
   "nodes": [
-    {"id":"trigger","type":"conduit","position":{"x":80,"y":180},"data":{"kind":"trigger","nodeType":"schedule","label":"Sunday at 18:00","description":"Weekly preview schedule","config":{"schedule":"0 18 * * 0","catchUpMinutes":1440,"retryCount":1}}},
-    {"id":"preview","type":"conduit","position":{"x":420,"y":180},"data":{"kind":"action","nodeType":"kmail_cleanup","label":"Preview KMail cleanup","description":"Write candidates.csv only","config":{"source":"~/Dev/kmail-cleanup","mode":"preview"}}},
-    {"id":"notify","type":"conduit","position":{"x":760,"y":180},"data":{"kind":"action","nodeType":"notification","label":"Review reminder","description":"Prompt for human review","config":{"message":"KMail cleanup preview is ready in ~/Dev/kmail-cleanup/runs"}}}
+    {"id":"trigger","type":"conduit","position":{"x":80,"y":180},"data":{"kind":"trigger","nodeType":"schedule","label":"Sunday at 18:00","description":"Weekly cleanup schedule","config":{"schedule":"0 18 * * 0","catchUpMinutes":1440,"retryCount":1}}},
+    {"id":"preview","type":"conduit","position":{"x":420,"y":180},"data":{"kind":"action","nodeType":"kmail_cleanup","label":"Preview and file KMail","description":"Create candidates.csv, then move that exact set to Cleanup Review","config":{"source":"~/Dev/kmail-cleanup","mode":"preview_and_apply"}}},
+    {"id":"notify","type":"conduit","position":{"x":760,"y":180},"data":{"kind":"action","nodeType":"notification","label":"Cleanup complete","description":"Show completion","config":{"message":"KMail cleanup moved its candidates to Cleanup Review"}}}
   ],
   "edges": [
     {"id":"e1","source":"trigger","target":"preview"},

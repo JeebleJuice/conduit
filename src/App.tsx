@@ -67,15 +67,25 @@ function Builder({ workflow, onUpdate, onRun }: { workflow: Workflow; onUpdate: 
 }
 
 function RunDialog({ result, dryRun, onClose }: { result?: EngineResult; dryRun: boolean; onClose: () => void }) {
-  return <div className="modal-backdrop"><section className="run-dialog">
-    <div className="dialog-icon"><ShieldCheck size={27} /></div>
-    <button className="dialog-close" onClick={onClose}><X size={18} /></button>
-    <span className="eyebrow">{dryRun ? "Dry run complete" : "Run complete"}</span>
-    <h2>{dryRun ? "Everything looks safe" : "Workflow finished"}</h2>
-    <p>{result?.run.message}</p>
-    <div className="operation-list">{result?.operations.map((operation) => <div key={operation.nodeId}><Check size={15} /><span><strong>{operation.nodeLabel}</strong><small>{operation.destination || operation.action}</small></span>{operation.warning && <em>{operation.warning}</em>}</div>)}</div>
-    <div className="dialog-summary"><span><b>{result?.operations.length ?? 0}</b> actions</span><span><b>{result?.run.files ?? 0}</b> files</span><span><b>{result?.run.durationMs ?? 0}ms</b> elapsed</span></div>
-    <button className="primary-wide" onClick={onClose}>Done</button>
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return <div className="modal-backdrop"><section className="run-dialog" role="dialog" aria-modal="true" aria-labelledby="run-dialog-title">
+    <button type="button" aria-label="Close run results" className="dialog-close" onClick={onClose}><X size={18} /></button>
+    <div className="dialog-heading">
+      <div className="dialog-icon"><ShieldCheck size={27} /></div>
+      <span className="eyebrow">{dryRun ? "Dry run complete" : "Run complete"}</span>
+      <h2 id="run-dialog-title">{dryRun ? "Everything looks safe" : "Workflow finished"}</h2>
+      <p>{result?.run.message}</p>
+    </div>
+    <div className="operation-list">{result?.operations.map((operation, index) => <div key={`${operation.nodeId}-${index}-${operation.source ?? ""}`}><Check size={15} /><span><strong>{operation.nodeLabel}</strong><small>{operation.destination || operation.action}</small></span>{operation.warning && <em>{operation.warning}</em>}</div>)}</div>
+    <div className="dialog-footer">
+      <div className="dialog-summary"><span><b>{result?.operations.length ?? 0}</b> actions</span><span><b>{result?.run.files ?? 0}</b> files</span><span><b>{result?.run.durationMs ?? 0}ms</b> elapsed</span></div>
+      <button type="button" autoFocus className="primary-wide" onClick={onClose}>Done</button>
+    </div>
   </section></div>;
 }
 

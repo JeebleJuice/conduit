@@ -389,8 +389,11 @@ fn plan_operations(
                 },
                 warning: match node.data.node_type.as_str() {
                     "http_request" => Some("External effects cannot be undone".into()),
+                    "kmail_cleanup" if string_config(node, "mode").as_deref() == Some("preview_and_apply") => {
+                        Some("Creates a fresh preview, then moves those messages to Cleanup Review; nothing is deleted".into())
+                    }
                     "kmail_cleanup" if string_config(node, "mode").as_deref() == Some("apply_reviewed") => {
-                        Some("Moves only the latest reviewed KMail preview; mail is not deleted".into())
+                        Some("Moves only the latest KMail preview to Cleanup Review; mail is not deleted".into())
                     }
                     "kmail_cleanup" => Some("Creates a review report; no mail is moved".into()),
                     _ => None,
@@ -653,7 +656,7 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let database_path = directory.join("runtime.sqlite3");
         database::initialize(&database_path).unwrap();
-        let workflow = Workflow {
+        let mut workflow = Workflow {
             id: "unsafe-mail-schedule".into(),
             name: "Unsafe mail schedule".into(),
             enabled: false,
@@ -690,6 +693,21 @@ mod tests {
             None,
         );
         assert_eq!(result.unwrap_err(), "Applying a KMail cleanup report is allowed only from a manual workflow");
+        workflow.nodes[1]
+            .data
+            .config
+            .insert("mode".into(), Value::String("preview_and_apply".into()));
+        let automatic = execute(
+            &workflow,
+            true,
+            &database_path,
+            "schedule",
+            None,
+            true,
+            &AtomicBool::new(false),
+            None,
+        );
+        assert!(automatic.is_ok());
         fs::remove_dir_all(directory).unwrap();
     }
 

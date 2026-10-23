@@ -199,8 +199,9 @@ pub(crate) fn run(
                 .get("mode")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("preview");
-            let arguments: Vec<String> = match mode {
-                "preview" => Vec::new(),
+            ensure_akonadi()?;
+            let output = match mode {
+                "preview" => external_path(&canonical_script, &[])?,
                 "apply_reviewed" => {
                     let runs = canonical_project
                         .join("runs")
@@ -224,12 +225,26 @@ pub(crate) fn run(
                     {
                         return Err("The reviewed report must be a candidates.csv inside the KMail Cleanup runs directory".into());
                     }
-                    vec!["--apply".into(), "--report".into(), report.display().to_string()]
+                    external_path(
+                        &canonical_script,
+                        &["--apply".into(), "--report".into(), report.display().to_string()],
+                    )?
                 }
-                _ => return Err("KMail Cleanup mode must be preview or apply_reviewed".into()),
+                "preview_and_apply" => {
+                    let preview = external_path(&canonical_script, &[])?;
+                    let runs = canonical_project
+                        .join("runs")
+                        .canonicalize()
+                        .map_err(|error| format!("KMail Cleanup runs directory is unavailable: {error}"))?;
+                    let report = report_from_preview_output(&preview, &runs)?;
+                    let applied = external_path(
+                        &canonical_script,
+                        &["--apply".into(), "--report".into(), report.display().to_string()],
+                    )?;
+                    format!("{preview}\n{applied}")
+                }
+                _ => return Err("KMail Cleanup mode must be preview, preview_and_apply, or apply_reviewed".into()),
             };
-            ensure_akonadi()?;
-            let output = external_path(&canonical_script, &arguments)?;
             append_context(context, &output);
             Ok(true)
         }
@@ -430,6 +445,28 @@ fn latest_candidates_report(runs: &Path) -> Result<std::path::PathBuf, String> {
         .pop()
         .map(|(_, report)| report)
         .ok_or_else(|| "No KMail cleanup preview was found. Run the preview workflow first.".into())
+}
+
+fn report_from_preview_output(output: &str, runs: &Path) -> Result<std::path::PathBuf, String> {
+    let raw = output
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("Review the exact list: "))
+        .ok_or("KMail cleanup preview did not report its candidates.csv path")?;
+    let report = Path::new(raw)
+        .canonicalize()
+        .map_err(|error| format!("Cannot open the new KMail cleanup preview: {error}"))?;
+    let canonical_runs = runs
+        .canonicalize()
+        .map_err(|error| format!("KMail Cleanup runs directory is unavailable: {error}"))?;
+    if !report.starts_with(&canonical_runs)
+        || report.file_name().and_then(|name| name.to_str()) != Some("candidates.csv")
+        || !report.is_file()
+        || !report.parent().is_some_and(|directory| directory.join("summary.txt").is_file())
+    {
+        return Err("The new KMail preview resolved outside its runs directory or is incomplete".into());
+    }
+    Ok(report)
 }
 
 fn git_command(repository: &Path, arguments: &[&str]) -> Result<String, String> {
@@ -705,6 +742,18 @@ mod tests {
         fs::write(older.join("candidates.csv"), "older").unwrap();
         fs::write(newer.join("candidates.csv"), "newer").unwrap();
         assert_eq!(latest_candidates_report(&root).unwrap(), newer.join("candidates.csv"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn kmail_preview_output_resolves_the_exact_new_report() {
+        let root = std::env::temp_dir().join(format!("conduit-mail-output-test-{}", uuid::Uuid::new_v4()));
+        let run = root.join("20261023-180000-000001");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(run.join("candidates.csv"), "akonadi_id,imap_uid,reason,sender,subject\n").unwrap();
+        fs::write(run.join("summary.txt"), "Candidates: 0\n").unwrap();
+        let output = format!("Candidates: 0\nReview the exact list: {}\n", run.join("candidates.csv").display());
+        assert_eq!(report_from_preview_output(&output, &root).unwrap(), run.join("candidates.csv"));
         fs::remove_dir_all(root).unwrap();
     }
 }

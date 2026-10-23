@@ -24,7 +24,7 @@ Recognized finance, career, study, and travel documents go to matching subfolder
 
 Every resulting directory must remain inside the workflow permission roots. Directories are created when needed, existing files are never overwritten, and every move is journalled for Undo. Classification is intentionally conservative: content rules only select a broad destination and do not execute or upload the file.
 
-## Weekly KMail cleanup preview
+## Weekly KMail cleanup
 
 This workflow runs Sunday at 18:00 with a 24-hour catch-up window. If the computer was off at the exact time, Conduit claims the most recent missed slot once after it returns. Schedule claims live in SQLite, preventing duplicate execution after a restart.
 
@@ -34,11 +34,11 @@ The dedicated node can start the user-session Akonadi backend, then invokes only
 ~/Dev/kmail-cleanup/sort_inbox.py
 ```
 
-Preview mode inspects the configured Inbox and writes a timestamped `candidates.csv` plus `summary.txt` under `~/Dev/kmail-cleanup/runs/`. It does not move or delete messages. Conduit then displays a reminder to review sender, subject, and classification reason.
+The scheduled action first inspects the configured Inbox and writes a fresh timestamped `candidates.csv` plus `summary.txt` under `~/Dev/kmail-cleanup/runs/`. Conduit resolves the exact path printed by that preview, verifies that it is a complete report inside the runs directory, and immediately applies it. The underlying cleanup tool revalidates every Akonadi and IMAP identifier before moving the candidates to the visible `Cleanup Review` folder. Nothing is permanently deleted; deciding what to delete or restore remains manual.
 
 ## Apply reviewed KMail cleanup
 
-After reviewing the newest preview, dry-run the manual workflow and run it. Conduit automatically selects the `candidates.csv` in the newest timestamped run directory and invokes the same fixed script with `--apply --report <resolved path>`. An older report can still be selected explicitly through the optional **Specific candidates.csv** field. Every report must resolve inside the cleanup project's `runs/` directory. The Rust engine refuses apply mode unless the workflow trigger is manual—even if imported JSON tries to schedule it.
+The separate manual workflow remains available for recovery or rerunning a preview. Conduit automatically selects the `candidates.csv` in the newest timestamped run directory and invokes the same fixed script with `--apply --report <resolved path>`. An older report can still be selected explicitly through the optional **Specific candidates.csv** field. Every report must resolve inside the cleanup project's `runs/` directory. This standalone apply mode remains manual-only—even if imported JSON tries to schedule it.
 
 The existing KMail tool validates the account and folder IDs, verifies each message's current Akonadi ID and IMAP UID, moves only the reviewed rows in acknowledged batches, and stops on synchronization drift or timeout. Messages go to the visible `Cleanup Review` folder; they are not permanently deleted. This external mail operation is deliberately not advertised as undoable by Conduit.
 

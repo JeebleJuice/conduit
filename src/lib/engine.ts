@@ -3,7 +3,7 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
-const BUILTINS_KEY = "conduit.builtins.v5";
+const BUILTINS_KEY = "conduit.builtins.v6";
 
 export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Workflow[] {
   const weeklyDefault = fallback.find((workflow) => workflow.id === "weekly-dev-note");
@@ -14,6 +14,44 @@ export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Wo
       && weeklyDefault
     ) {
       return { ...weeklyDefault, enabled: false, updatedAt: new Date().toISOString() };
+    }
+    if (
+      workflow.id === "weekly-kmail-cleanup-preview"
+      && workflow.nodes.some((node) => node.data.nodeType === "kmail_cleanup" && node.data.config.mode === "preview")
+    ) {
+      const nodes = workflow.nodes.map((node) => {
+        if (node.data.nodeType === "kmail_cleanup" && node.data.config.mode === "preview") {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              label: "Preview and file KMail",
+              description: "Create candidates.csv, then move that exact set to Cleanup Review",
+              config: { ...node.data.config, mode: "preview_and_apply" },
+            },
+          };
+        }
+        if (node.data.nodeType === "notification") {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              label: "Cleanup complete",
+              description: "Show completion",
+              config: { ...node.data.config, message: "KMail cleanup moved its candidates to Cleanup Review" },
+            },
+          };
+        }
+        return node;
+      });
+      return {
+        ...workflow,
+        name: "Weekly KMail cleanup",
+        description: "Preview conservative candidates every Sunday, then move that exact set to Cleanup Review.",
+        enabled: false,
+        nodes,
+        updatedAt: new Date().toISOString(),
+      };
     }
     if (workflow.id === "apply-reviewed-kmail-cleanup") {
       const nodes = workflow.nodes.map((node) => {
