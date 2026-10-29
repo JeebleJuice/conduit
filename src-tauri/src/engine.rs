@@ -259,7 +259,13 @@ fn candidate_files(
     };
 
     candidates.retain(|file| {
-        condition_matches(workflow, file)
+        let incomplete_download = workflow
+            .nodes
+            .iter()
+            .any(|node| node.data.node_type == "organize_downloads")
+            && downloads::is_incomplete_download(file);
+        !incomplete_download
+            && condition_matches(workflow, file)
             && (!background || !database::was_processed(db_path, &workflow.id, file).unwrap_or(false))
     });
     candidates.sort();
@@ -325,6 +331,7 @@ fn plan_operations(
         if uses_files && !sources.is_empty() {
             for original_source in &sources {
                 let source = routed.get(original_source).cloned().unwrap_or_else(|| original_source.clone());
+                let mut action = node.data.node_type.clone();
                 let target = match node.data.node_type.as_str() {
                     "copy" | "move" => destination.as_ref().map(|directory| {
                         let name = string_config(node, "template")
@@ -347,10 +354,16 @@ fn plan_operations(
                     "compress" => destination.clone().map(collision_safe),
                     "extract" => destination.clone(),
                     "checksum" => Some(collision_safe(PathBuf::from(format!("{}.sha256", source.display())))),
-                    "organize_downloads" => downloads::destination(&source, node)?
-                        .map(|directory| assert_allowed(&directory, permissions))
-                        .transpose()?
-                        .map(|directory| collision_safe(directory.join(source.file_name().unwrap_or_default()))),
+                    "organize_downloads" => match downloads::organization(&source, node)? {
+                        Some(downloads::Organization::Move(directory)) => {
+                            Some(collision_safe(assert_allowed(&directory, permissions)?.join(source.file_name().unwrap_or_default())))
+                        }
+                        Some(downloads::Organization::ExtractRom(directory)) => {
+                            action = "extract_rom_archive".into();
+                            Some(assert_allowed(&directory, permissions)?)
+                        }
+                        None => None,
+                    },
                     _ => None,
                 };
                 if node.data.node_type == "organize_downloads" && target.is_none() {
@@ -365,11 +378,12 @@ fn plan_operations(
                 operations.push(PreviewOperation {
                     node_id: node.id.clone(),
                     node_label: node.data.label.clone(),
-                    action: node.data.node_type.clone(),
+                    action: action.clone(),
                     source: Some(source.display().to_string()),
                     destination: target.map(|path| path.display().to_string()),
-                    warning: match node.data.node_type.as_str() {
+                    warning: match action.as_str() {
                         "move" | "organize_downloads" => Some("Original file will be moved".into()),
+                        "extract_rom_archive" => Some("ROMs will be extracted and the source archive deleted after success".into()),
                         "trash" => Some("File will be sent to desktop trash".into()),
                         "http_request" => Some("External effects cannot be undone".into()),
                         _ => None,
@@ -407,7 +421,7 @@ fn plan_operations(
         .any(|node| node.data.node_type == "organize_downloads");
     let organized_download = operations
         .iter()
-        .any(|operation| operation.action == "organize_downloads");
+        .any(|operation| matches!(operation.action.as_str(), "organize_downloads" | "extract_rom_archive"));
     if has_download_organizer && !organized_download {
         operations.retain(|operation| operation.action != "notification");
     }
@@ -446,6 +460,11 @@ fn perform_operations(
             continue;
         }
         match operation.action.as_str() {
+            "extract_rom_archive" => {
+                if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
+                    downloads::extract_rom_archive(Path::new(source), Path::new(destination))?;
+                }
+            }
             "create_directory" => {
                 if let Some(destination) = &operation.destination {
                     let created = !Path::new(destination).exists();

@@ -33,6 +33,8 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
     { key: "musicRoot", label: "Music root", placeholder: "~/Music" },
     { key: "archivesRoot", label: "Archives folder", placeholder: "~/Documents/Archives" },
     { key: "softwareRoot", label: "Installers and packages", placeholder: "~/Programs" },
+    { key: "romsRoot", label: "ROM library", placeholder: "~/Programs/Roms" },
+    { key: "ps4Root", label: "PS4 packages", placeholder: "~/Programs/PS4" },
     { key: "maxFiles", label: "Maximum files per run", placeholder: "50", type: "number" },
   ],
   file_inventory: [{ key: "source", label: "Folder or file", placeholder: "~/Downloads" }, { key: "maxFiles", label: "Maximum files", placeholder: "100", type: "number" }],

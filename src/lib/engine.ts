@@ -81,6 +81,8 @@ export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Wo
       if (!config.softwareRoot || config.softwareRoot === "~/Downloads/Software") {
         config.softwareRoot = "~/Programs";
       }
+      if (!config.romsRoot) config.romsRoot = "~/Programs/Roms";
+      if (!config.ps4Root) config.ps4Root = "~/Programs/PS4";
       delete config.otherRoot;
       return { ...node, data: { ...node.data, config } };
     });

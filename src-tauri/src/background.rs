@@ -1,10 +1,10 @@
 use crate::{
-    database,
+    database, downloads,
     engine::{self, expand_home, number_config, string_config, trigger_node},
     models::{WorkerHealth, Workflow},
 };
 use chrono::{Datelike, Local, Timelike, Utc};
-use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{event::{ModifyKind, RenameMode}, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::AppHandle;
 use std::{
     collections::{HashMap, HashSet},
@@ -54,8 +54,9 @@ fn run_loop(
     let mut startup_fired = HashSet::new();
     let mut fingerprints: HashMap<String, u64> = HashMap::new();
     let mut last_refresh = Instant::now() - Duration::from_secs(30);
-    let mut last_reconcile = Instant::now();
+    let mut last_reconcile = Instant::now() - Duration::from_secs(60);
     let mut cooldowns: HashMap<String, Instant> = HashMap::new();
+    let mut pending_folder_events: HashMap<String, HashMap<PathBuf, Instant>> = HashMap::new();
     let mut webhooks: HashMap<String, TcpListener> = HashMap::new();
     let mut mounted = mount_points();
     let mut last_mount_check = Instant::now();
@@ -141,16 +142,10 @@ fn run_loop(
             Ok(Ok(event)) if is_relevant_folder_event(&event) => {
                 for workflow in &workflows {
                     let Some(folder) = watched_folder(workflow) else { continue };
-                    let matching: Vec<PathBuf> = event
-                        .paths
-                        .iter()
-                        .filter(|path| path.starts_with(&folder))
-                        .cloned()
-                        .collect();
-                    if matching.is_empty() || recently_ran(&mut cooldowns, &workflow.id) {
-                        continue;
+                    let pending = pending_folder_events.entry(workflow.id.clone()).or_default();
+                    for path in event.paths.iter().filter(|path| path.starts_with(&folder)) {
+                        pending.insert(path.clone(), Instant::now());
                     }
-                    run_with_retries(db_path, workflow, "folder change", Some(&matching), cancelled, execution_lock, app, None);
                 }
             }
             Ok(Ok(_)) => {}
@@ -162,14 +157,45 @@ fn run_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
 
+        let mut settled = Vec::new();
+        pending_folder_events.retain(|workflow_id, paths| {
+            let ready: Vec<PathBuf> = paths
+                .iter()
+                .filter_map(|(path, changed_at)| (changed_at.elapsed() >= Duration::from_secs(3)).then_some(path.clone()))
+                .collect();
+            for path in &ready {
+                paths.remove(path);
+            }
+            if !ready.is_empty() {
+                settled.push((workflow_id.clone(), ready));
+            }
+            !paths.is_empty()
+        });
+        for (workflow_id, paths) in settled {
+            if let Some(workflow) = workflows.iter().find(|workflow| workflow.id == workflow_id) {
+                let organizes_downloads = workflow
+                    .nodes
+                    .iter()
+                    .any(|node| node.data.node_type == "organize_downloads");
+                let ready: Vec<PathBuf> = paths
+                    .into_iter()
+                    .filter(|path| path.is_file() && (!organizes_downloads || !downloads::is_incomplete_download(path)))
+                    .collect();
+                if !ready.is_empty() {
+                    run_with_retries(db_path, workflow, "completed folder change", Some(&ready), cancelled, execution_lock, app, None);
+                }
+            }
+        }
+
         if last_reconcile.elapsed() >= Duration::from_secs(60) {
             for workflow in &workflows {
                 let Some(folder) = watched_folder(workflow) else { continue };
                 let current = folder_fingerprint(&folder);
-                if let Some(previous) = fingerprints.insert(workflow.id.clone(), current) {
-                    if previous != current && !recently_ran(&mut cooldowns, &workflow.id) {
-                        run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
-                    }
+                let changed = fingerprints
+                    .insert(workflow.id.clone(), current)
+                    .is_none_or(|previous| previous != current);
+                if changed && !recently_ran(&mut cooldowns, &workflow.id) {
+                    run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
                 }
             }
             if let Ok(mut value) = health.lock() {
@@ -186,7 +212,9 @@ fn run_loop(
 fn is_relevant_folder_event(event: &Event) -> bool {
     matches!(
         event.kind,
-        EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Name(_))
+        EventKind::Create(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(RenameMode::To | RenameMode::Both | RenameMode::Any))
     )
 }
 

@@ -25,6 +25,7 @@ The project now covers the original release stages and advanced-node roadmap:
 - drive-mounted and loopback webhook triggers;
 - desktop notifications and honest, journalled Undo;
 - safe ZIP creation/extraction and desktop-trash actions;
+- completed-download detection plus console-aware ROM extraction into `~/Programs/Roms` and PS4 `.pkg` routing into `~/Programs/PS4`;
 - HTTPS requests with OS-keyring bearer secrets, timeouts, redirect limits, and response limits;
 - FFmpeg conversion, Git summaries, Tesseract OCR, and ExifTool metadata nodes;
 - user-defined manual-run form values;
