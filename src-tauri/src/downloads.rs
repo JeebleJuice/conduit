@@ -134,6 +134,7 @@ fn direct_rom_console(source: &Path, extension: &str) -> Option<&'static str> {
         "n64" | "v64" | "z64" => Some("N64"),
         "gcm" => Some("GameCube"),
         "wbfs" | "wad" => Some("Wii"),
+        "wux" | "wud" | "wua" | "rpx" => Some("Wii U"),
         "cue" | "chd" | "pbp" => Some("PS1"),
         "bin" if source.with_extension("cue").exists() => Some("PS1"),
         "iso" => disc_console(&file_prefix(source, 32)),
@@ -144,6 +145,16 @@ fn direct_rom_console(source: &Path, extension: &str) -> Option<&'static str> {
 fn rom_archive_console(source: &Path) -> Result<Option<&'static str>, String> {
     let entries = archive_entries(source)?;
     let has_cue = entries.iter().any(|entry| extension(Path::new(entry)) == "cue");
+    let has_wii_u_layout = ["code", "content", "meta"].iter().all(|expected| {
+        entries.iter().any(|entry| {
+            Path::new(entry).components().any(|component| {
+                component.as_os_str().to_string_lossy().eq_ignore_ascii_case(expected)
+            })
+        })
+    });
+    if has_wii_u_layout {
+        return Ok(Some("Wii U"));
+    }
     for entry in &entries {
         let entry_extension = extension(Path::new(entry));
         let console = match entry_extension.as_str() {
@@ -152,6 +163,7 @@ fn rom_archive_console(source: &Path) -> Result<Option<&'static str>, String> {
             "n64" | "v64" | "z64" => Some("N64"),
             "gcm" => Some("GameCube"),
             "wbfs" | "wad" => Some("Wii"),
+            "wux" | "wud" | "wua" | "rpx" => Some("Wii U"),
             "cue" | "chd" | "pbp" => Some("PS1"),
             "bin" if has_cue => Some("PS1"),
             "iso" => disc_console(&archive_entry_prefix(source, entry, 32)),
@@ -552,6 +564,48 @@ mod tests {
         extract_rom_archive(&source, &destination).unwrap();
         assert!(destination.join("Game/game.sfc").is_file());
         assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_and_extracts_a_wii_u_wux_archive() {
+        let root = std::env::temp_dir().join(format!("conduit-wii-u-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Wind Waker HD.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("Wind Waker HD.wux", SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"wii u disc image").unwrap();
+        archive.finish().unwrap();
+
+        let destination = root.join("Programs/Roms/Wii U");
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::ExtractRom(destination.clone()))
+        );
+        extract_rom_archive(&source, &destination).unwrap();
+        assert!(destination.join("Wind Waker HD.wux").is_file());
+        assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_a_wii_u_extracted_game_layout() {
+        let root = std::env::temp_dir().join(format!("conduit-wii-u-layout-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Wii U game.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        for entry in ["Game/code/game.rpx", "Game/content/data.bin", "Game/meta/meta.xml"] {
+            archive.start_file(entry, SimpleFileOptions::default()).unwrap();
+            archive.write_all(b"data").unwrap();
+        }
+        archive.finish().unwrap();
+
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::ExtractRom(root.join("Programs/Roms/Wii U")))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
