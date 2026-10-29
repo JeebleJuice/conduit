@@ -1,8 +1,28 @@
 use crate::{
-    database, downloads,
+    database, downloads, removable,
     engine::{self, expand_home, number_config, string_config, trigger_node},
     models::{WorkerHealth, Workflow},
 };
+
+struct PendingDriveRetry {
+    mount_path: PathBuf,
+    last_available: u64,
+    space_increased_at: Option<Instant>,
+}
+
+impl PendingDriveRetry {
+    fn observe_available_space(&mut self, available: u64, now: Instant) -> bool {
+        if available > self.last_available {
+            self.last_available = available;
+            self.space_increased_at = Some(now);
+        } else if available < self.last_available {
+            self.last_available = available;
+            self.space_increased_at = None;
+        }
+        self.space_increased_at
+            .is_some_and(|changed| now.duration_since(changed) >= Duration::from_secs(3))
+    }
+}
 use chrono::{Datelike, Local, Timelike, Utc};
 use notify::{event::{ModifyKind, RenameMode}, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::AppHandle;
@@ -60,6 +80,7 @@ fn run_loop(
     let mut pending_folder_events: HashMap<String, HashMap<PathBuf, Instant>> = HashMap::new();
     let mut webhooks: HashMap<String, TcpListener> = HashMap::new();
     let mut mounted = HashSet::new();
+    let mut pending_drive_retries: HashMap<String, PendingDriveRetry> = HashMap::new();
     let mut last_mount_check = Instant::now();
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -78,7 +99,7 @@ fn run_loop(
                         if trigger_node(workflow).is_some_and(|node| node.data.node_type == "startup")
                             && startup_fired.insert(workflow.id.clone())
                         {
-                            run_with_retries(db_path, workflow, "startup", None, cancelled, execution_lock, app, None);
+                            let _ = run_with_retries(db_path, workflow, "startup", None, cancelled, execution_lock, app, None);
                         }
                     }
                 }
@@ -90,7 +111,7 @@ fn run_loop(
         for workflow in &workflows {
             if let Some(slot) = due_schedule_slot(workflow, &Local::now()) {
                 if database::claim_schedule(db_path, &workflow.id, &slot).unwrap_or(false) {
-                    run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock, app, None);
+                    let _ = run_with_retries(db_path, workflow, "schedule", None, cancelled, execution_lock, app, None);
                 }
             }
         }
@@ -116,7 +137,7 @@ fn run_loop(
                 let _ = stream.write_all(response.as_bytes());
                 if valid && !recently_ran(&mut cooldowns, &workflow.id) {
                     let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-                    run_with_retries(db_path, workflow, "local webhook", None, cancelled, execution_lock, app, Some(body));
+                    let _ = run_with_retries(db_path, workflow, "local webhook", None, cancelled, execution_lock, app, Some(body));
                 }
             }
         }
@@ -133,11 +154,71 @@ fn run_loop(
                         .is_none_or(|wanted| mount_uuid(path).is_some_and(|actual| actual.eq_ignore_ascii_case(&wanted)));
                     if matches_name && matches_uuid && !recently_ran(&mut cooldowns, &workflow.id) {
                         let mounted_path = path.display().to_string();
-                        run_with_retries(db_path, workflow, "drive mounted", None, cancelled, execution_lock, app, Some(&mounted_path));
+                        match run_with_retries(
+                            db_path,
+                            workflow,
+                            "drive mounted",
+                            None,
+                            cancelled,
+                            execution_lock,
+                            app,
+                            Some(&mounted_path),
+                        ) {
+                            Err(error) if removable::is_insufficient_space_error(&error) => {
+                                pending_drive_retries.insert(
+                                    workflow.id.clone(),
+                                    PendingDriveRetry {
+                                        mount_path: path.clone(),
+                                        last_available: removable::available_space(path).unwrap_or_default(),
+                                        space_increased_at: None,
+                                    },
+                                );
+                            }
+                            _ => {
+                                pending_drive_retries.remove(&workflow.id);
+                            }
+                        }
                     }
                 }
             }
             mounted = current;
+
+            pending_drive_retries.retain(|_, pending| mounted.contains(&pending.mount_path));
+            let now = Instant::now();
+            let mut ready = Vec::new();
+            for (workflow_id, pending) in &mut pending_drive_retries {
+                let Some(available) = removable::available_space(&pending.mount_path) else { continue };
+                if pending.observe_available_space(available, now) {
+                    ready.push((workflow_id.clone(), pending.mount_path.clone()));
+                }
+            }
+            for (workflow_id, mount_path) in ready {
+                let Some(workflow) = workflows.iter().find(|workflow| workflow.id == workflow_id) else {
+                    pending_drive_retries.remove(&workflow_id);
+                    continue;
+                };
+                let mounted_path = mount_path.display().to_string();
+                match run_with_retries(
+                    db_path,
+                    workflow,
+                    "drive space available",
+                    None,
+                    cancelled,
+                    execution_lock,
+                    app,
+                    Some(&mounted_path),
+                ) {
+                    Err(error) if removable::is_insufficient_space_error(&error) => {
+                        if let Some(pending) = pending_drive_retries.get_mut(&workflow_id) {
+                            pending.last_available = removable::available_space(&mount_path).unwrap_or(pending.last_available);
+                            pending.space_increased_at = None;
+                        }
+                    }
+                    _ => {
+                        pending_drive_retries.remove(&workflow_id);
+                    }
+                }
+            }
             last_mount_check = Instant::now();
         }
 
@@ -185,7 +266,16 @@ fn run_loop(
                     .filter(|path| path.is_file() && (!organizes_downloads || !downloads::is_incomplete_download(path)))
                     .collect();
                 if !ready.is_empty() {
-                    run_with_retries(db_path, workflow, "completed folder change", Some(&ready), cancelled, execution_lock, app, None);
+                    let _ = run_with_retries(
+                        db_path,
+                        workflow,
+                        "completed folder change",
+                        Some(&ready),
+                        cancelled,
+                        execution_lock,
+                        app,
+                        None,
+                    );
                 }
             }
         }
@@ -198,7 +288,7 @@ fn run_loop(
                     .insert(workflow.id.clone(), current)
                     .is_none_or(|previous| previous != current);
                 if changed && !recently_ran(&mut cooldowns, &workflow.id) {
-                    run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
+                    let _ = run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
                 }
             }
             if let Ok(mut value) = health.lock() {
@@ -399,8 +489,8 @@ fn run_with_retries(
     execution_lock: &Mutex<()>,
     app: &Option<AppHandle>,
     initial_context: Option<&str>,
-) {
-    let Ok(_guard) = execution_lock.lock() else { return };
+) -> Result<(), String> {
+    let Ok(_guard) = execution_lock.lock() else { return Err("Background execution lock is unavailable".into()) };
     cancelled.store(false, Ordering::Relaxed);
     let attempts = retry_count(workflow);
     let mut final_error = None;
@@ -410,11 +500,11 @@ fn run_with_retries(
                 if let Some(app) = app {
                     crate::send_notifications(app, &result);
                 }
-                return;
+                return Ok(());
             }
             Err(error) => {
                 if error == "Run stopped by user" {
-                    return;
+                    return Err(error);
                 }
                 final_error = Some(error);
                 if attempt + 1 < attempts {
@@ -425,6 +515,9 @@ fn run_with_retries(
     }
     if let Some(error) = final_error {
         let _ = database::record_failure(db_path, workflow, trigger, &error);
+        Err(error)
+    } else {
+        Ok(())
     }
 }
 
@@ -459,6 +552,23 @@ mod tests {
         assert!(is_relevant_folder_event(&Event::new(EventKind::Modify(
             ModifyKind::Name(notify::event::RenameMode::To),
         ))));
+    }
+
+    #[test]
+    fn pending_drive_retry_waits_for_freed_space_to_settle() {
+        let started = Instant::now();
+        let mut pending = PendingDriveRetry {
+            mount_path: PathBuf::from("/drive"),
+            last_available: 100,
+            space_increased_at: None,
+        };
+
+        assert!(!pending.observe_available_space(200, started));
+        assert!(!pending.observe_available_space(200, started + Duration::from_secs(2)));
+        assert!(pending.observe_available_space(200, started + Duration::from_secs(3)));
+
+        assert!(!pending.observe_available_space(150, started + Duration::from_secs(4)));
+        assert_eq!(pending.space_increased_at, None);
     }
 
     #[test]

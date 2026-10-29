@@ -270,8 +270,12 @@ fn verify_writable(destination: &Path) -> Result<(), String> {
     fs::remove_file(probe).map_err(|error| error.to_string())
 }
 
+pub(crate) fn is_insufficient_space_error(error: &str) -> bool {
+    error.starts_with("The SSD needs ") && error.contains(" more bytes for this sync")
+}
+
 #[cfg(unix)]
-fn available_space(path: &Path) -> Option<u64> {
+pub(crate) fn available_space(path: &Path) -> Option<u64> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -283,7 +287,7 @@ fn available_space(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn available_space(_path: &Path) -> Option<u64> {
+pub(crate) fn available_space(_path: &Path) -> Option<u64> {
     None
 }
 
