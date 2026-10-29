@@ -5,10 +5,10 @@ mod downloads;
 mod engine;
 mod models;
 
-use models::{CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus};
+use models::{CapabilityStatus, EngineResult, PreviewOperation, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus};
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -117,9 +117,123 @@ fn undo_run(run_id: String, state: State<AppState>) -> Result<usize, String> {
 }
 
 pub(crate) fn send_notifications(app: &AppHandle, result: &EngineResult) {
+    if let Some((title, body)) = organizer_notification(result) {
+        let _ = app.notification().builder().title(title).body(body).show();
+        return;
+    }
     for operation in result.operations.iter().filter(|operation| operation.action == "notification") {
         let body = operation.destination.as_deref().unwrap_or("Workflow complete");
         let _ = app.notification().builder().title(&result.run.workflow_name).body(body).show();
+    }
+}
+
+fn organizer_notification(result: &EngineResult) -> Option<(String, String)> {
+    if !result.operations.iter().any(|operation| operation.action == "notification") {
+        return None;
+    }
+    let organized: Vec<&PreviewOperation> = result
+        .operations
+        .iter()
+        .filter(|operation| matches!(operation.action.as_str(), "organize_downloads" | "extract_rom_archive"))
+        .collect();
+    if organized.is_empty() {
+        return None;
+    }
+
+    let mut lines: Vec<String> = organized.iter().take(4).filter_map(|operation| {
+        let source = Path::new(operation.source.as_deref()?).file_name()?.to_string_lossy();
+        let destination = compact_path(operation.destination.as_deref()?);
+        let suffix = (operation.action == "extract_rom_archive").then_some(" (extracted)").unwrap_or_default();
+        Some(format!("{} → {}{}", truncate(&source, 52), truncate(&destination, 76), suffix))
+    }).collect();
+    if organized.len() > lines.len() {
+        lines.push(format!("+{} more", organized.len() - lines.len()));
+    }
+    let count = organized.len();
+    Some((
+        format!("Organized {count} download{}", if count == 1 { "" } else { "s" }),
+        lines.join("\n"),
+    ))
+}
+
+fn compact_path(raw: &str) -> String {
+    let path = Path::new(raw);
+    dirs::home_dir()
+        .and_then(|home| path.strip_prefix(home).ok().map(|relative| format!("~/{}", relative.display())))
+        .unwrap_or_else(|| raw.to_owned())
+}
+
+fn truncate(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_owned();
+    }
+    let mut shortened: String = value.chars().take(limit.saturating_sub(1)).collect();
+    shortened.push('…');
+    shortened
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn operation(action: &str, source: Option<&str>, destination: Option<&str>) -> PreviewOperation {
+        PreviewOperation {
+            node_id: action.into(),
+            node_label: action.into(),
+            action: action.into(),
+            source: source.map(str::to_owned),
+            destination: destination.map(str::to_owned),
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn download_notification_names_the_file_and_destination() {
+        let home = dirs::home_dir().unwrap();
+        let result = EngineResult {
+            run: RunRecord {
+                id: "run".into(),
+                workflow_id: "downloads".into(),
+                workflow_name: "Downloads".into(),
+                started_at: "now".into(),
+                duration_ms: 1,
+                status: "success".into(),
+                files: 1,
+                reversible: true,
+                message: String::new(),
+            },
+            operations: vec![
+                operation(
+                    "organize_downloads",
+                    Some("/tmp/game.pkg"),
+                    Some(&home.join("Programs/PS4/game.pkg").display().to_string()),
+                ),
+                operation("notification", None, Some("New downloads were organized")),
+            ],
+            node_statuses: HashMap::new(),
+        };
+        let (title, body) = organizer_notification(&result).unwrap();
+        assert_eq!(title, "Organized 1 download");
+        assert_eq!(body, "game.pkg → ~/Programs/PS4/game.pkg");
+    }
+
+    #[test]
+    fn extracted_rom_notification_says_it_was_extracted() {
+        let result = EngineResult {
+            run: RunRecord {
+                id: "run".into(), workflow_id: "downloads".into(), workflow_name: "Downloads".into(),
+                started_at: "now".into(), duration_ms: 1, status: "success".into(), files: 1,
+                reversible: false, message: String::new(),
+            },
+            operations: vec![
+                operation("extract_rom_archive", Some("/tmp/Mario.zip"), Some("/tmp/Roms/N64")),
+                operation("notification", None, Some("done")),
+            ],
+            node_statuses: HashMap::new(),
+        };
+        let (_, body) = organizer_notification(&result).unwrap();
+        assert_eq!(body, "Mario.zip → /tmp/Roms/N64 (extracted)");
     }
 }
 
