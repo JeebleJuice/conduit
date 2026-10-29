@@ -26,6 +26,7 @@ The project now covers the original release stages and advanced-node roadmap:
 - desktop notifications and honest, journalled Undo;
 - safe ZIP creation/extraction and desktop-trash actions;
 - completed-download detection plus console-aware ROM extraction into `~/Programs/Roms` and PS4 `.pkg` routing into `~/Programs/PS4`;
+- label-and-UUID matched PS4USB synchronization that copies the ROM directory tree and atomically moves verified `.pkg` files to the SSD root;
 - HTTPS requests with OS-keyring bearer secrets, timeouts, redirect limits, and response limits;
 - FFmpeg conversion, Git summaries, Tesseract OCR, and ExifTool metadata nodes;
 - user-defined manual-run form values;

@@ -4,6 +4,7 @@ mod database;
 mod downloads;
 mod engine;
 mod models;
+mod removable;
 
 use models::{CapabilityStatus, EngineResult, PreviewOperation, RunRecord, WorkerHealth, Workflow, WorkflowRuntimeStatus};
 use std::{
@@ -255,6 +256,11 @@ pub fn run() {
             fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("conduit.sqlite3");
             database::initialize(&db_path).map_err(std::io::Error::other)?;
+            let ssd_workflow = removable::ps4usb_workflow();
+            if !database::workflow_exists(&db_path, &ssd_workflow.id).map_err(std::io::Error::other)? {
+                database::approve_preview(&db_path, &ssd_workflow).map_err(std::io::Error::other)?;
+                database::set_enabled(&db_path, &ssd_workflow, true).map_err(std::io::Error::other)?;
+            }
 
             let health = Arc::new(Mutex::new(WorkerHealth::default()));
             let shutdown = Arc::new(AtomicBool::new(false));

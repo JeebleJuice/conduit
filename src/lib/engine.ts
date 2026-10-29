@@ -3,7 +3,7 @@ import type { CapabilityStatus, EngineResult, RunRecord, WorkerHealth, Workflow,
 
 const STORAGE_KEY = "conduit.workflows.v1";
 const RUNS_KEY = "conduit.runs.v1";
-const BUILTINS_KEY = "conduit.builtins.v6";
+const BUILTINS_KEY = "conduit.builtins.v7";
 
 export function upgradeBuiltins(workflows: Workflow[], fallback: Workflow[]): Workflow[] {
   const weeklyDefault = fallback.find((workflow) => workflow.id === "weekly-dev-note");

@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -58,7 +59,7 @@ fn run_loop(
     let mut cooldowns: HashMap<String, Instant> = HashMap::new();
     let mut pending_folder_events: HashMap<String, HashMap<PathBuf, Instant>> = HashMap::new();
     let mut webhooks: HashMap<String, TcpListener> = HashMap::new();
-    let mut mounted = mount_points();
+    let mut mounted = HashSet::new();
     let mut last_mount_check = Instant::now();
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -128,7 +129,9 @@ fn run_loop(
                     let matches_name = string_config(trigger, "mountName").is_none_or(|wanted| {
                         path.file_name().is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&wanted.to_lowercase()))
                     });
-                    if matches_name && !recently_ran(&mut cooldowns, &workflow.id) {
+                    let matches_uuid = string_config(trigger, "mountUuid")
+                        .is_none_or(|wanted| mount_uuid(path).is_some_and(|actual| actual.eq_ignore_ascii_case(&wanted)));
+                    if matches_name && matches_uuid && !recently_ran(&mut cooldowns, &workflow.id) {
                         let mounted_path = path.display().to_string();
                         run_with_retries(db_path, workflow, "drive mounted", None, cancelled, execution_lock, app, Some(&mounted_path));
                     }
@@ -207,6 +210,21 @@ fn run_loop(
     if let Ok(mut value) = health.lock() {
         value.running = false;
     }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_uuid(path: &Path) -> Option<String> {
+    let output = Command::new("findmnt")
+        .args(["--noheadings", "--output", "UUID", "--target"])
+        .arg(path)
+        .output()
+        .ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()).filter(|uuid| !uuid.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mount_uuid(_path: &Path) -> Option<String> {
+    None
 }
 
 fn is_relevant_folder_event(event: &Event) -> bool {

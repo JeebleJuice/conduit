@@ -175,6 +175,13 @@ pub(crate) fn sync_workflow(path: &Path, workflow: &Workflow) -> Result<Workflow
     status_for(&connection, &workflow.id)
 }
 
+pub(crate) fn workflow_exists(path: &Path, workflow_id: &str) -> Result<bool, String> {
+    let connection = open(path)?;
+    connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM workflows WHERE id=?1)", [workflow_id], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn approve_preview(path: &Path, workflow: &Workflow) -> Result<(), String> {
     sync_workflow(path, workflow)?;
     let connection = open(path)?;

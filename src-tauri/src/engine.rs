@@ -1,4 +1,4 @@
-use crate::{actions, database, downloads};
+use crate::{actions, database, downloads, removable};
 use crate::models::{EngineResult, PreviewOperation, RunRecord, Workflow, WorkflowNode};
 use chrono::Utc;
 use serde_json::Value;
@@ -318,6 +318,10 @@ fn plan_operations(
             .transpose()?
             .map(|path| assert_allowed(&path, permissions))
             .transpose()?;
+        if node.data.node_type == "sync_removable_library" {
+            let packages = string_config(node, "packagesSource").ok_or("Removable-library sync needs a PS4 package source")?;
+            assert_allowed(&expand_home(&packages)?, permissions)?;
+        }
         let uses_files = matches!(
             node.data.node_type.as_str(),
             "copy" | "move" | "rename" | "checksum" | "trash" | "compress" | "extract" |
@@ -429,7 +433,7 @@ fn plan_operations(
 }
 
 fn perform_operations(
-    operations: &[PreviewOperation],
+    operations: &mut [PreviewOperation],
     workflow: &Workflow,
     cancelled: &AtomicBool,
     db_path: &Path,
@@ -437,7 +441,7 @@ fn perform_operations(
     initial_context: Option<&str>,
 ) -> Result<(), String> {
     let mut context = initial_context.unwrap_or_default().to_owned();
-    for (sequence, operation) in operations.iter().enumerate() {
+    for (sequence, operation) in operations.iter_mut().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Run stopped by user".into());
         }
@@ -446,6 +450,9 @@ fn perform_operations(
             .iter()
             .find(|node| node.id == operation.node_id)
             .ok_or("An action node no longer exists")?;
+        if operation.action == "notification" {
+            operation.destination = operation.destination.as_ref().map(|message| message.replace("{input}", &context));
+        }
         if actions::run(operation, node, &mut context)? {
             if matches!(operation.action.as_str(), "compress" | "media_convert") {
                 database::record_operation(
@@ -460,6 +467,27 @@ fn perform_operations(
             continue;
         }
         match operation.action.as_str() {
+            "sync_removable_library" => {
+                let source = Path::new(operation.source.as_deref().ok_or("Removable-library sync needs a ROM source")?);
+                let destination = Path::new(operation.destination.as_deref().ok_or("Removable-library sync needs an SSD destination")?);
+                let mounted = initial_context.ok_or("Removable-library sync runs only after its SSD is mounted")?;
+                if Path::new(mounted).canonicalize().map_err(|error| error.to_string())?
+                    != destination.canonicalize().map_err(|error| error.to_string())?
+                {
+                    return Err("The mounted drive does not match the configured SSD destination".into());
+                }
+                let packages = string_config(node, "packagesSource").ok_or("Removable-library sync needs a PS4 package source")?;
+                let packages = expand_home(&packages)?;
+                let summary = removable::sync_library(source, &packages, destination, cancelled)?;
+                context = format!(
+                    "Copied {} new ROM file{}, skipped {} already present, and moved {} PS4 package{}.",
+                    summary.copied_roms,
+                    if summary.copied_roms == 1 { "" } else { "s" },
+                    summary.skipped_roms,
+                    summary.moved_packages,
+                    if summary.moved_packages == 1 { "" } else { "s" }
+                );
+            }
             "extract_rom_archive" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
                     downloads::extract_rom_archive(Path::new(source), Path::new(destination))?;
@@ -565,14 +593,15 @@ pub(crate) fn execute(
                 node.data.node_type.as_str(),
                 "copy" | "move" | "rename" | "write_text" | "create_directory" | "checksum" |
                 "trash" | "compress" | "extract" | "media_convert" | "git_summary" | "ocr" |
-                "document_metadata" | "organize_downloads" | "file_inventory" | "kmail_cleanup"
+                "document_metadata" | "organize_downloads" | "file_inventory" | "kmail_cleanup" |
+                "sync_removable_library"
             )
         })
     {
         return Err("Add at least one folder permission before using filesystem actions".into());
     }
     let files = candidate_files(workflow, &permissions, event_paths, db_path, background)?;
-    let operations = plan_operations(workflow, &ordered, &files, &permissions)?;
+    let mut operations = plan_operations(workflow, &ordered, &files, &permissions)?;
 
     if dry_run {
         database::approve_preview(db_path, workflow)?;
@@ -596,7 +625,7 @@ pub(crate) fn execute(
     database::begin_run(db_path, &run, trigger)?;
 
     if !dry_run {
-        if let Err(error) = perform_operations(&operations, workflow, cancelled, db_path, &run.id, initial_context) {
+        if let Err(error) = perform_operations(&mut operations, workflow, cancelled, db_path, &run.id, initial_context) {
             run.status = if error == "Run stopped by user" { "stopped".into() } else { "failed".into() };
             run.duration_ms = started.elapsed().as_millis();
             run.message = format!("{trigger}: {error}");
@@ -639,7 +668,7 @@ pub(crate) fn execute(
         "manual", "folder_changed", "schedule", "startup", "extension", "file_size", "age", "exists",
         "create_directory", "copy", "move", "rename", "write_text", "checksum", "notification", "trash",
         "compress", "extract", "http_request", "media_convert", "git_summary", "ocr", "document_metadata",
-        "organize_downloads", "file_inventory", "kmail_cleanup",
+        "organize_downloads", "file_inventory", "kmail_cleanup", "sync_removable_library",
     ];
     let node_statuses = ordered
         .into_iter()

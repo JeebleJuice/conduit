@@ -27,6 +27,7 @@ export const nodeCatalog = [
   { kind: "action", nodeType: "ocr", label: "Read text (OCR)", description: "Extract text with Tesseract" },
   { kind: "action", nodeType: "document_metadata", label: "Document metadata", description: "Read metadata with ExifTool" },
   { kind: "action", nodeType: "organize_downloads", label: "Organize downloads", description: "Route by type, name, and bounded content" },
+  { kind: "action", nodeType: "sync_removable_library", label: "Sync ROM SSD", description: "Copy ROMs and move PS4 packages to a removable drive" },
   { kind: "action", nodeType: "file_inventory", label: "File inventory", description: "Build a readable file list for a report" },
   { kind: "action", nodeType: "kmail_cleanup", label: "KMail Cleanup", description: "Preview or apply the dedicated cleanup tool" },
 ] as const;
@@ -66,6 +67,23 @@ export const initialWorkflows: Workflow[] = [
     edges: [
       { id: "smart-e1", source: "smart-trigger", target: "smart-sort" },
       { id: "smart-e2", source: "smart-sort", target: "smart-notify" },
+    ],
+  },
+  {
+    id: "ps4usb-library-sync",
+    name: "Sync ROM library to PS4USB",
+    description: "When the PS4USB SSD is mounted, copy the ROM tree and move PS4 packages to its root.",
+    enabled: false,
+    updatedAt: new Date().toISOString(),
+    permissions: ["~/Programs/Roms", "~/Programs/PS4", "/run/media/jeeblejuice/PS4USB"],
+    nodes: [
+      { id: "ps4usb-trigger", type: "conduit", position: { x: 80, y: 180 }, data: { kind: "trigger", nodeType: "drive_mounted", label: "PS4USB inserted", description: "Match this SSD by label and UUID", config: { mountName: "PS4USB", mountUuid: "EAFF-37B0" } } },
+      { id: "ps4usb-sync", type: "conduit", position: { x: 410, y: 180 }, data: { kind: "action", nodeType: "sync_removable_library", label: "Update SSD library", description: "Copy ROM folders; move completed .pkg files", config: { source: "~/Programs/Roms", packagesSource: "~/Programs/PS4", destination: "/run/media/jeeblejuice/PS4USB" } } },
+      { id: "ps4usb-notify", type: "conduit", position: { x: 760, y: 180 }, data: { kind: "action", nodeType: "notification", label: "SSD ready", description: "Confirm transfer completion", config: { message: "PS4USB sync finished. {input} It is safe to eject when no other program is using the drive." } } },
+    ],
+    edges: [
+      { id: "ps4usb-e1", source: "ps4usb-trigger", target: "ps4usb-sync" },
+      { id: "ps4usb-e2", source: "ps4usb-sync", target: "ps4usb-notify" },
     ],
   },
   {
