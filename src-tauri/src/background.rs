@@ -292,7 +292,7 @@ fn run_loop(
                     .insert(workflow.id.clone(), current)
                     .is_none_or(|previous| previous != current)
                     || (workflow.nodes.iter().any(|node| node.data.node_type == "organize_downloads")
-                        && downloads::has_wii_u_directory(&folder));
+                        && downloads::has_organizable_directory(&folder));
                 if changed && !recently_ran(&mut cooldowns, &workflow.id) {
                     let _ = run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
                 }
@@ -501,14 +501,22 @@ fn run_with_retries(
     let attempts = retry_count(workflow);
     let mut final_error = None;
     for attempt in 0..attempts {
-        let transfer_notification = |bytes| {
+        let progress_notification = |event| {
             if let Some(app) = app {
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("PS4USB transfer started")
-                    .body(format!("Conduit is transferring {} of new ROMs and PS4 packages to the SSD.", format_bytes(bytes)))
-                    .show();
+                let (title, body) = match event {
+                    engine::ProgressEvent::RemovableTransfer { bytes } => (
+                        "PS4USB transfer started",
+                        format!("Conduit is transferring {} of new ROMs and PS4 packages to the SSD.", format_bytes(bytes)),
+                    ),
+                    engine::ProgressEvent::ArchiveExtraction { source, destination } => {
+                        let name = Path::new(&source).file_name().unwrap_or_default().to_string_lossy();
+                        (
+                            "Archive extraction started",
+                            format!("{name} → {destination}. Conduit will notify you when it finishes."),
+                        )
+                    }
+                };
+                let _ = app.notification().builder().title(title).body(body).show();
             }
         };
         match engine::execute(
@@ -520,7 +528,7 @@ fn run_with_retries(
             true,
             cancelled,
             initial_context,
-            Some(&transfer_notification),
+            Some(&progress_notification),
         ) {
             Ok(result) => {
                 if let Some(app) = app {

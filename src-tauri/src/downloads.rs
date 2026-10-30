@@ -20,19 +20,34 @@ pub(crate) enum Organization {
 
 pub(crate) fn is_incomplete_download(source: &Path) -> bool {
     if source.is_dir() {
-        return !is_wii_u_layout(source) || !directory_is_settled(source, Duration::from_secs(30));
+        return !(is_wii_u_layout(source) || multipart_first_volume(source).is_some())
+            || !directory_is_settled(source, Duration::from_secs(30));
+    }
+    if is_multipart_first_volume(source) {
+        return source.parent().is_none_or(|parent| !directory_is_settled(parent, Duration::from_secs(30)));
     }
     matches!(extension(source).as_str(), "part" | "crdownload" | "download" | "tmp")
         || source.metadata().map(|metadata| metadata.len() == 0).unwrap_or(true)
 }
 
-pub(crate) fn has_wii_u_directory(folder: &Path) -> bool {
+pub(crate) fn has_organizable_directory(folder: &Path) -> bool {
     fs::read_dir(folder)
         .ok()
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
-        .any(|entry| entry.path().is_dir() && is_wii_u_layout(&entry.path()))
+        .any(|entry| {
+            entry.path().is_dir()
+                && (is_wii_u_layout(&entry.path()) || multipart_first_volume(&entry.path()).is_some())
+        })
+}
+
+pub(crate) fn candidate_path(path: PathBuf) -> PathBuf {
+    if path.is_dir() {
+        multipart_first_volume(&path).unwrap_or(path)
+    } else {
+        path
+    }
 }
 
 pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<Organization>, String> {
@@ -81,6 +96,48 @@ fn is_wii_u_layout(root: &Path) -> bool {
             entry.path().is_dir() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(name)
         })
     })
+}
+
+fn multipart_first_volume(root: &Path) -> Option<PathBuf> {
+    fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.is_file() && is_multipart_first_volume(path))
+}
+
+fn is_multipart_first_volume(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase().ends_with(".part01.rar"))
+        .unwrap_or(false)
+}
+
+fn multipart_volumes(source: &Path) -> Vec<PathBuf> {
+    let Some(file_name) = source.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()) else {
+        return vec![source.to_path_buf()];
+    };
+    let Some(prefix) = file_name.strip_suffix("part01.rar") else {
+        return vec![source.to_path_buf()];
+    };
+    let mut volumes: Vec<PathBuf> = source
+        .parent()
+        .and_then(|parent| fs::read_dir(parent).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+            name.starts_with(prefix)
+                && name.strip_prefix(prefix).is_some_and(|suffix| {
+                    suffix.starts_with("part")
+                        && suffix.ends_with(".rar")
+                        && suffix[4..suffix.len() - 4].chars().all(|character| character.is_ascii_digit())
+                })
+        })
+        .collect();
+    volumes.sort();
+    volumes
 }
 
 fn directory_is_settled(root: &Path, quiet_for: Duration) -> bool {
@@ -431,7 +488,12 @@ fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) ->
                 fs::rename(entry.path(), target).map_err(|error| error.to_string())?;
             }
         }
-        fs::remove_file(source).map_err(|error| format!("ROMs were extracted, but the archive could not be deleted: {error}"))
+        for volume in multipart_volumes(source) {
+            fs::remove_file(&volume).map_err(|error| {
+                format!("Archive contents were extracted, but {} could not be deleted: {error}", volume.display())
+            })?;
+        }
+        Ok(())
     });
     let _ = fs::remove_dir_all(&staging);
     extraction
@@ -803,12 +865,33 @@ mod tests {
             Some(Organization::Move(root.join("Programs/Roms/Wii U")))
         );
         assert!(is_incomplete_download(&source), "a newly written directory must wait for its quiet period");
-        assert!(has_wii_u_directory(&root));
+        assert!(has_organizable_directory(&root));
         fs::File::open(source.join("code/game.rpx"))
             .unwrap()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(31))
             .unwrap();
         assert!(!is_incomplete_download(&source), "the complete quiet directory should become ready");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn treats_a_settled_multipart_rar_folder_as_one_candidate() {
+        let root = std::env::temp_dir().join(format!("conduit-multipart-test-{}", uuid::Uuid::new_v4()));
+        let folder = root.join("Twilight Princess");
+        fs::create_dir_all(&folder).unwrap();
+        let first = folder.join("game.part01.rar");
+        let second = folder.join("game.part02.rar");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        assert_eq!(candidate_path(folder.clone()), first);
+        assert!(has_organizable_directory(&root));
+        assert!(is_incomplete_download(&first));
+        let settled = std::time::SystemTime::now() - Duration::from_secs(31);
+        fs::File::open(&first).unwrap().set_modified(settled).unwrap();
+        fs::File::open(&second).unwrap().set_modified(settled).unwrap();
+        assert!(!is_incomplete_download(&first));
+        assert_eq!(multipart_volumes(&first), vec![first, second]);
         fs::remove_dir_all(root).unwrap();
     }
 

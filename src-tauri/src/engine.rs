@@ -12,6 +12,11 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(crate) enum ProgressEvent {
+    RemovableTransfer { bytes: u64 },
+    ArchiveExtraction { source: String, destination: String },
+}
+
 pub(crate) fn workflow_signature(workflow: &Workflow) -> Result<String, String> {
     let material = serde_json::json!({
         "id": workflow.id,
@@ -262,6 +267,7 @@ fn candidate_files(
         Vec::new()
     };
 
+    candidates = candidates.into_iter().map(downloads::candidate_path).collect();
     candidates.retain(|file| {
         let incomplete_download = organizes_downloads && downloads::is_incomplete_download(file);
         !incomplete_download
@@ -451,7 +457,7 @@ fn perform_operations(
     db_path: &Path,
     run_id: &str,
     initial_context: Option<&str>,
-    on_transfer_started: Option<&dyn Fn(u64)>,
+    on_progress: Option<&dyn Fn(ProgressEvent)>,
 ) -> Result<(), String> {
     let mut context = initial_context.unwrap_or_default().to_owned();
     for (sequence, operation) in operations.iter_mut().enumerate() {
@@ -491,7 +497,12 @@ fn perform_operations(
                 }
                 let packages = string_config(node, "packagesSource").ok_or("Removable-library sync needs a PS4 package source")?;
                 let packages = expand_home(&packages)?;
-                let summary = removable::sync_library(source, &packages, destination, cancelled, on_transfer_started)?;
+                let announce = |bytes| {
+                    if let Some(notify) = on_progress {
+                        notify(ProgressEvent::RemovableTransfer { bytes });
+                    }
+                };
+                let summary = removable::sync_library(source, &packages, destination, cancelled, Some(&announce))?;
                 context = format!(
                     "Copied {} new ROM file{}, skipped {} already present, and moved {} PS4 package{}.",
                     summary.copied_roms,
@@ -503,11 +514,23 @@ fn perform_operations(
             }
             "extract_rom_archive" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
+                    if let Some(notify) = on_progress {
+                        notify(ProgressEvent::ArchiveExtraction {
+                            source: source.clone(),
+                            destination: destination.clone(),
+                        });
+                    }
                     downloads::extract_rom_archive(Path::new(source), Path::new(destination))?;
                 }
             }
             "extract_package_archive" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
+                    if let Some(notify) = on_progress {
+                        notify(ProgressEvent::ArchiveExtraction {
+                            source: source.clone(),
+                            destination: destination.clone(),
+                        });
+                    }
                     downloads::extract_package_archive(Path::new(source), Path::new(destination))?;
                 }
             }
@@ -591,7 +614,7 @@ pub(crate) fn execute(
     background: bool,
     cancelled: &AtomicBool,
     initial_context: Option<&str>,
-    on_transfer_started: Option<&dyn Fn(u64)>,
+    on_progress: Option<&dyn Fn(ProgressEvent)>,
 ) -> Result<EngineResult, String> {
     let started = Instant::now();
     let ordered = validate_graph(workflow)?;
@@ -651,7 +674,7 @@ pub(crate) fn execute(
             db_path,
             &run.id,
             initial_context,
-            on_transfer_started,
+            on_progress,
         ) {
             run.status = if error == "Run stopped by user" { "stopped".into() } else { "failed".into() };
             run.duration_ms = started.elapsed().as_millis();
