@@ -473,6 +473,7 @@ fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) ->
 
     let extraction = extract_archive_to(source, &staging).and_then(|_| {
         validate_extracted_tree(&staging)?;
+        normalize_single_wii_u_disc_name(source, &staging)?;
         if flatten {
             let mut files = recursive_extracted_files(&staging)?;
             files.sort();
@@ -497,6 +498,24 @@ fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) ->
     });
     let _ = fs::remove_dir_all(&staging);
     extraction
+}
+
+fn normalize_single_wii_u_disc_name(source: &Path, staging: &Path) -> Result<(), String> {
+    if is_multipart_first_volume(source) {
+        return Ok(());
+    }
+    let discs: Vec<PathBuf> = recursive_extracted_files(staging)?
+        .into_iter()
+        .filter(|path| matches!(extension(path).as_str(), "wud" | "wux" | "wua"))
+        .collect();
+    let [disc] = discs.as_slice() else { return Ok(()) };
+    let Some(archive_name) = source.file_stem().filter(|name| !name.is_empty()) else { return Ok(()) };
+    let Some(disc_extension) = disc.extension() else { return Ok(()) };
+    let destination = disc.with_file_name(archive_name).with_extension(disc_extension);
+    if destination != *disc {
+        fs::rename(disc, collision_safe(destination)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
@@ -800,6 +819,24 @@ mod tests {
         extract_rom_archive(&source, &destination).unwrap();
         assert!(destination.join("Wind Waker HD.wux").is_file());
         assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn names_a_single_wii_u_disc_after_its_descriptive_archive() {
+        let root = std::env::temp_dir().join(format!("conduit-wii-u-name-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Super Mario 3D World.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("pwr-sm3dw.wud", SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"disc image").unwrap();
+        archive.finish().unwrap();
+
+        let destination = root.join("Programs/Roms/Wii U");
+        extract_rom_archive(&source, &destination).unwrap();
+        assert!(destination.join("Super Mario 3D World.wud").is_file());
+        assert!(!destination.join("pwr-sm3dw.wud").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
