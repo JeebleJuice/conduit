@@ -77,6 +77,7 @@ pub(crate) fn sync_library(
     packages_source: &Path,
     destination_root: &Path,
     cancelled: &AtomicBool,
+    on_transfer_started: Option<&dyn Fn(u64)>,
 ) -> Result<SyncSummary, String> {
     if !roms_source.is_dir() {
         return Err(format!("ROM source is unavailable: {}", roms_source.display()));
@@ -109,6 +110,11 @@ pub(crate) fn sync_library(
                 required,
                 available
             ));
+        }
+    }
+    if required > 0 {
+        if let Some(notify) = on_transfer_started {
+            notify(required);
         }
     }
 
@@ -271,7 +277,16 @@ fn verify_writable(destination: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn is_insufficient_space_error(error: &str) -> bool {
-    error.starts_with("The SSD needs ") && error.contains(" more bytes for this sync")
+    insufficient_space_needed(error).is_some()
+}
+
+pub(crate) fn insufficient_space_needed(error: &str) -> Option<u64> {
+    error
+        .strip_prefix("The SSD needs ")?
+        .split_once(" more bytes for this sync")?
+        .0
+        .parse()
+        .ok()
 }
 
 #[cfg(unix)]
@@ -294,6 +309,7 @@ pub(crate) fn available_space(_path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU64;
 
     #[test]
     fn copies_rom_tree_and_moves_only_packages() {
@@ -308,7 +324,17 @@ mod tests {
         fs::write(packages.join("game.pkg"), b"package").unwrap();
         fs::write(packages.join("notes.txt"), b"keep").unwrap();
 
-        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false)).unwrap();
+        let announced = AtomicU64::new(0);
+        let announce = |bytes| announced.store(bytes, Ordering::Relaxed);
+        let summary = sync_library(
+            &roms,
+            &packages,
+            &drive,
+            &AtomicBool::new(false),
+            Some(&announce),
+        )
+        .unwrap();
+        assert_eq!(announced.load(Ordering::Relaxed), 10);
         assert_eq!(summary.copied_roms, 1);
         assert_eq!(summary.moved_packages, 1);
         assert_eq!(fs::read(drive.join("Roms/N64/game.z64")).unwrap(), b"rom");
@@ -330,7 +356,7 @@ mod tests {
         fs::create_dir_all(drive.join("Roms/SNES")).unwrap();
         fs::write(roms.join("SNES/game.sfc"), b"same").unwrap();
         fs::write(drive.join("Roms/SNES/game.sfc"), b"same").unwrap();
-        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false)).unwrap();
+        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
         assert_eq!(summary.skipped_roms, 1);
         assert!(roms.join("SNES/game.sfc").is_file());
         fs::remove_dir_all(root).unwrap();

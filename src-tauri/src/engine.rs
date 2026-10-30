@@ -451,6 +451,7 @@ fn perform_operations(
     db_path: &Path,
     run_id: &str,
     initial_context: Option<&str>,
+    on_transfer_started: Option<&dyn Fn(u64)>,
 ) -> Result<(), String> {
     let mut context = initial_context.unwrap_or_default().to_owned();
     for (sequence, operation) in operations.iter_mut().enumerate() {
@@ -490,7 +491,7 @@ fn perform_operations(
                 }
                 let packages = string_config(node, "packagesSource").ok_or("Removable-library sync needs a PS4 package source")?;
                 let packages = expand_home(&packages)?;
-                let summary = removable::sync_library(source, &packages, destination, cancelled)?;
+                let summary = removable::sync_library(source, &packages, destination, cancelled, on_transfer_started)?;
                 context = format!(
                     "Copied {} new ROM file{}, skipped {} already present, and moved {} PS4 package{}.",
                     summary.copied_roms,
@@ -590,6 +591,7 @@ pub(crate) fn execute(
     background: bool,
     cancelled: &AtomicBool,
     initial_context: Option<&str>,
+    on_transfer_started: Option<&dyn Fn(u64)>,
 ) -> Result<EngineResult, String> {
     let started = Instant::now();
     let ordered = validate_graph(workflow)?;
@@ -642,7 +644,15 @@ pub(crate) fn execute(
     database::begin_run(db_path, &run, trigger)?;
 
     if !dry_run {
-        if let Err(error) = perform_operations(&mut operations, workflow, cancelled, db_path, &run.id, initial_context) {
+        if let Err(error) = perform_operations(
+            &mut operations,
+            workflow,
+            cancelled,
+            db_path,
+            &run.id,
+            initial_context,
+            on_transfer_started,
+        ) {
             run.status = if error == "Run stopped by user" { "stopped".into() } else { "failed".into() };
             run.duration_ms = started.elapsed().as_millis();
             run.message = format!("{trigger}: {error}");
@@ -816,6 +826,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             None,
+            None,
         );
         assert_eq!(result.unwrap_err(), "Applying a KMail cleanup report is allowed only from a manual workflow");
         workflow.nodes[1]
@@ -830,6 +841,7 @@ mod tests {
             None,
             true,
             &AtomicBool::new(false),
+            None,
             None,
         );
         assert!(automatic.is_ok());

@@ -40,7 +40,7 @@ fn execute_workflow(
     let _guard = state.execution_lock.lock().map_err(|_| "Execution lock is unavailable")?;
     state.cancelled.store(false, Ordering::Relaxed);
     database::sync_workflow(&state.db_path, &workflow)?;
-    let result = engine::execute(&workflow, dry_run, &state.db_path, "manual", None, false, &state.cancelled, None)?;
+    let result = engine::execute(&workflow, dry_run, &state.db_path, "manual", None, false, &state.cancelled, None, None)?;
     if !dry_run {
         send_notifications(&app, &result);
     }

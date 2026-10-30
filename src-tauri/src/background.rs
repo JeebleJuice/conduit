@@ -26,6 +26,7 @@ impl PendingDriveRetry {
 use chrono::{Datelike, Local, Timelike, Utc};
 use notify::{event::{ModifyKind, RenameMode}, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::AppHandle;
+use tauri_plugin_notification::NotificationExt;
 use std::{
     collections::{HashMap, HashSet},
     io::{Read, Write},
@@ -500,7 +501,27 @@ fn run_with_retries(
     let attempts = retry_count(workflow);
     let mut final_error = None;
     for attempt in 0..attempts {
-        match engine::execute(workflow, false, db_path, trigger, event_paths, true, cancelled, initial_context) {
+        let transfer_notification = |bytes| {
+            if let Some(app) = app {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("PS4USB transfer started")
+                    .body(format!("Conduit is transferring {} of new ROMs and PS4 packages to the SSD.", format_bytes(bytes)))
+                    .show();
+            }
+        };
+        match engine::execute(
+            workflow,
+            false,
+            db_path,
+            trigger,
+            event_paths,
+            true,
+            cancelled,
+            initial_context,
+            Some(&transfer_notification),
+        ) {
             Ok(result) => {
                 if let Some(app) = app {
                     crate::send_notifications(app, &result);
@@ -520,9 +541,37 @@ fn run_with_retries(
     }
     if let Some(error) = final_error {
         let _ = database::record_failure(db_path, workflow, trigger, &error);
+        if workflow.id == "ps4usb-library-sync" {
+            if let Some(app) = app {
+                let (title, body) = if let Some(bytes) = removable::insufficient_space_needed(&error) {
+                    (
+                        "PS4USB sync waiting for space",
+                        format!(
+                            "The SSD needs {} more. Delete installed packages while it remains connected; Conduit will retry automatically.",
+                            format_bytes(bytes)
+                        ),
+                    )
+                } else {
+                    ("PS4USB sync failed", error.clone())
+                };
+                let _ = app.notification().builder().title(title).body(body).show();
+            }
+        }
         Err(error)
     } else {
         Ok(())
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / GIB)
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    } else {
+        format!("{bytes} bytes")
     }
 }
 
