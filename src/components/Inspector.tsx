@@ -34,6 +34,7 @@ const fieldMap: Record<string, { key: string; label: string; placeholder: string
     { key: "archivesRoot", label: "Archives folder", placeholder: "~/Documents/Archives" },
     { key: "softwareRoot", label: "Installers and packages", placeholder: "~/Programs" },
     { key: "romsRoot", label: "ROM library", placeholder: "~/Programs/Roms" },
+    { key: "ps2Root", label: "PS2 disc images", placeholder: "~/Programs/PS2" },
     { key: "ps4Root", label: "PS4 packages", placeholder: "~/Programs/PS4" },
     { key: "maxFiles", label: "Maximum files per run", placeholder: "50", type: "number" },
   ],

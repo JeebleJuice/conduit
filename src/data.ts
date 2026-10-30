@@ -61,7 +61,7 @@ export const initialWorkflows: Workflow[] = [
     permissions: ["~/Downloads", "~/Documents", "~/Pictures", "~/Videos", "~/Music", "~/Programs"],
     nodes: [
       { id: "smart-trigger", type: "conduit", position: { x: 90, y: 180 }, data: { kind: "trigger", nodeType: "folder_changed", label: "Download completed", description: "Watch ~/Downloads", config: { path: "~/Downloads" } } },
-      { id: "smart-sort", type: "conduit", position: { x: 430, y: 180 }, data: { kind: "action", nodeType: "organize_downloads", label: "Classify and move", description: "Type, filename, content, and ROM rules", config: { documentsRoot: "~/Documents", picturesRoot: "~/Pictures", videosRoot: "~/Videos", musicRoot: "~/Music", archivesRoot: "~/Documents/Archives", softwareRoot: "~/Programs", romsRoot: "~/Programs/Roms", ps4Root: "~/Programs/PS4", maxFiles: 50 } } },
+      { id: "smart-sort", type: "conduit", position: { x: 430, y: 180 }, data: { kind: "action", nodeType: "organize_downloads", label: "Classify and move", description: "Type, filename, content, and ROM rules", config: { documentsRoot: "~/Documents", picturesRoot: "~/Pictures", videosRoot: "~/Videos", musicRoot: "~/Music", archivesRoot: "~/Documents/Archives", softwareRoot: "~/Programs", romsRoot: "~/Programs/Roms", ps2Root: "~/Programs/PS2", ps4Root: "~/Programs/PS4", maxFiles: 50 } } },
       { id: "smart-notify", type: "conduit", position: { x: 780, y: 180 }, data: { kind: "action", nodeType: "notification", label: "Sorting complete", description: "Show a desktop notification", config: { message: "New downloads were organized" } } },
     ],
     edges: [

@@ -10,6 +10,7 @@ use zip::ZipArchive;
 
 const SAMPLE_LIMIT: u64 = 256 * 1024;
 const ROM_ARCHIVE_LIMIT: u64 = 100 * 1024 * 1024 * 1024;
+const ISO_SAMPLE_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Organization {
@@ -67,9 +68,8 @@ pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<
         return Ok(Some(Organization::Move(root(node, "ps4Root", "~/Programs/PS4")?)));
     }
     if let Some(console) = direct_rom_console(source, &extension) {
-        return Ok(Some(Organization::Move(
-            root(node, "romsRoot", "~/Programs/Roms")?.join(console),
-        )));
+        let destination = console_destination(node, console)?;
+        return Ok(Some(Organization::Move(destination)));
     }
     if matches!(extension.as_str(), "zip" | "7z" | "rar") {
         let entries = archive_entries(source)?;
@@ -81,13 +81,19 @@ pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<
             return Ok(Some(Organization::ExtractPackage(root(node, "ps4Root", "~/Programs/PS4")?)));
         }
         if let Some(console) = rom_archive_console(source, &entries) {
-            return Ok(Some(Organization::ExtractRom(
-                root(node, "romsRoot", "~/Programs/Roms")?.join(console),
-            )));
+            return Ok(Some(Organization::ExtractRom(console_destination(node, console)?)));
         }
     }
 
     destination(source, node).map(|destination| destination.map(Organization::Move))
+}
+
+fn console_destination(node: &WorkflowNode, console: &str) -> Result<PathBuf, String> {
+    if console == "PS2" {
+        root(node, "ps2Root", "~/Programs/PS2")
+    } else {
+        Ok(root(node, "romsRoot", "~/Programs/Roms")?.join(console))
+    }
 }
 
 fn is_wii_u_layout(root: &Path) -> bool {
@@ -259,7 +265,7 @@ fn direct_rom_console(source: &Path, extension: &str) -> Option<&'static str> {
         "wux" | "wud" | "wua" | "rpx" => Some("Wii U"),
         "cue" | "chd" | "pbp" => Some("PS1"),
         "bin" if source.with_extension("cue").exists() => Some("PS1"),
-        "iso" => disc_console(&file_prefix(source, 32)),
+        "iso" => iso_console(&file_prefix(source, ISO_SAMPLE_LIMIT)),
         _ => None,
     }
 }
@@ -287,7 +293,7 @@ fn rom_archive_console(source: &Path, entries: &[String]) -> Option<&'static str
             "wux" | "wud" | "wua" | "rpx" => Some("Wii U"),
             "cue" | "chd" | "pbp" => Some("PS1"),
             "bin" if has_cue => Some("PS1"),
-            "iso" => disc_console(&archive_entry_prefix(source, entry, 32)),
+            "iso" => iso_console(&archive_entry_prefix(source, entry, ISO_SAMPLE_LIMIT)),
             _ => None,
         };
         if console.is_some() {
@@ -295,6 +301,19 @@ fn rom_archive_console(source: &Path, entries: &[String]) -> Option<&'static str
         }
     }
     None
+}
+
+fn iso_console(sample: &[u8]) -> Option<&'static str> {
+    disc_console(sample).or_else(|| is_ps2_iso(sample).then_some("PS2"))
+}
+
+fn is_ps2_iso(sample: &[u8]) -> bool {
+    contains_bytes(sample, b"SYSTEM.CNF")
+        && (contains_bytes(sample, b"PLAYSTATION2 DVD-ROM FILE SET") || contains_bytes(sample, b"BOOT2 = cdrom0"))
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 fn disc_console(prefix: &[u8]) -> Option<&'static str> {
@@ -720,6 +739,7 @@ mod tests {
                     ("picturesRoot".into(), Value::String(root.join("Pictures").display().to_string())),
                     ("romsRoot".into(), Value::String(root.join("Programs/Roms").display().to_string())),
                     ("ps4Root".into(), Value::String(root.join("Programs/PS4").display().to_string())),
+                    ("ps2Root".into(), Value::String(root.join("Programs/PS2").display().to_string())),
                 ]),
             },
         }
@@ -837,6 +857,32 @@ mod tests {
         extract_rom_archive(&source, &destination).unwrap();
         assert!(destination.join("Super Mario 3D World.wud").is_file());
         assert!(!destination.join("pwr-sm3dw.wud").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_and_extracts_a_ps2_iso_archive() {
+        let root = std::env::temp_dir().join(format!("conduit-ps2-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Harry Potter.7z.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("Harry Potter.iso", SimpleFileOptions::default()).unwrap();
+        let mut iso_sample = vec![0_u8; 600_000];
+        iso_sample[534_837..534_847].copy_from_slice(b"SYSTEM.CNF");
+        let marker = b"PLAYSTATION2 DVD-ROM FILE SET";
+        iso_sample[545_073..545_073 + marker.len()].copy_from_slice(marker);
+        archive.write_all(&iso_sample).unwrap();
+        archive.finish().unwrap();
+
+        let destination = root.join("Programs/PS2");
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::ExtractRom(destination.clone()))
+        );
+        extract_rom_archive(&source, &destination).unwrap();
+        assert!(destination.join("Harry Potter.iso").is_file());
+        assert!(!source.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
