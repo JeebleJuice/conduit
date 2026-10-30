@@ -308,6 +308,15 @@ pub(crate) fn begin_run(path: &Path, run: &RunRecord, trigger: &str) -> Result<(
 pub(crate) fn finish_run(path: &Path, run: &RunRecord) -> Result<(), String> {
     let mut connection = open(path)?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let (definition, enabled): (String, bool) = transaction
+        .query_row(
+            "SELECT definition,enabled FROM workflows WHERE id=?1",
+            [&run.workflow_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    let workflow: Workflow = serde_json::from_str(&definition).map_err(|error| error.to_string())?;
+    let runtime_state = if enabled { trigger_state(&workflow) } else { "ready" };
     transaction
         .execute(
             "INSERT OR REPLACE INTO runs VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -319,8 +328,8 @@ pub(crate) fn finish_run(path: &Path, run: &RunRecord) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "UPDATE workflows SET last_run_at=?2,runtime_state=CASE WHEN enabled=1 THEN runtime_state ELSE 'ready' END,last_error=NULL WHERE id=?1",
-            params![run.workflow_id, run.started_at],
+            "UPDATE workflows SET last_run_at=?2,runtime_state=?3,last_error=NULL WHERE id=?1",
+            params![run.workflow_id, run.started_at, runtime_state],
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())

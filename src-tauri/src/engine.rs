@@ -504,10 +504,13 @@ fn perform_operations(
                 };
                 let summary = removable::sync_library(source, &packages, destination, cancelled, Some(&announce))?;
                 context = format!(
-                    "Copied {} new ROM file{}, skipped {} already present, and moved {} PS4 package{}.",
-                    summary.copied_roms,
-                    if summary.copied_roms == 1 { "" } else { "s" },
-                    summary.skipped_roms,
+                    "Copied or updated {} ROM game{} ({} file{}), left {} already-current game{} unchanged, and moved {} PS4 package{}.",
+                    summary.updated_rom_items,
+                    if summary.updated_rom_items == 1 { "" } else { "s" },
+                    summary.copied_rom_files,
+                    if summary.copied_rom_files == 1 { "" } else { "s" },
+                    summary.unchanged_rom_items,
+                    if summary.unchanged_rom_items == 1 { "" } else { "s" },
                     summary.moved_packages,
                     if summary.moved_packages == 1 { "" } else { "s" }
                 );

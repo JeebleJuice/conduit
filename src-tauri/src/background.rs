@@ -506,7 +506,10 @@ fn run_with_retries(
                 let (title, body) = match event {
                     engine::ProgressEvent::RemovableTransfer { bytes } => (
                         "PS4USB transfer started",
-                        format!("Conduit is transferring {} of new ROMs and PS4 packages to the SSD.", format_bytes(bytes)),
+                        format!(
+                            "Conduit found {} not yet present on the SSD and started transferring it. Existing matching files are excluded.",
+                            format_bytes(bytes)
+                        ),
                     ),
                     engine::ProgressEvent::ArchiveExtraction { source, destination } => {
                         let name = Path::new(&source).file_name().unwrap_or_default().to_string_lossy();

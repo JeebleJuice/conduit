@@ -1,7 +1,7 @@
 use crate::models::{NodeData, Workflow, WorkflowEdge, WorkflowNode};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -67,8 +67,10 @@ pub(crate) fn ps4usb_workflow() -> Workflow {
 }
 
 pub(crate) struct SyncSummary {
-    pub copied_roms: usize,
-    pub skipped_roms: usize,
+    pub updated_rom_items: usize,
+    pub unchanged_rom_items: usize,
+    pub copied_rom_files: usize,
+    pub skipped_rom_files: usize,
     pub moved_packages: usize,
 }
 
@@ -118,19 +120,32 @@ pub(crate) fn sync_library(
         }
     }
 
-    let mut summary = SyncSummary { copied_roms: 0, skipped_roms: 0, moved_packages: 0 };
+    let mut summary = SyncSummary {
+        updated_rom_items: 0,
+        unchanged_rom_items: 0,
+        copied_rom_files: 0,
+        skipped_rom_files: 0,
+        moved_packages: 0,
+    };
+    let mut all_rom_items = HashSet::new();
+    let mut updated_rom_items = HashSet::new();
     for source in rom_files {
         ensure_running(cancelled)?;
         let relative = source.strip_prefix(roms_source).map_err(|error| error.to_string())?;
+        let item = rom_item(relative);
+        all_rom_items.insert(item.clone());
         let destination = roms_destination.join(relative);
         if destination.exists() {
             ensure_matching_size(&source, &destination)?;
-            summary.skipped_roms += 1;
+            summary.skipped_rom_files += 1;
             continue;
         }
         copy_atomic(&source, &destination, cancelled)?;
-        summary.copied_roms += 1;
+        updated_rom_items.insert(item);
+        summary.copied_rom_files += 1;
     }
+    summary.updated_rom_items = updated_rom_items.len();
+    summary.unchanged_rom_items = all_rom_items.difference(&updated_rom_items).count();
 
     for source in packages {
         ensure_running(cancelled)?;
@@ -149,6 +164,16 @@ pub(crate) fn sync_library(
         summary.moved_packages += 1;
     }
     Ok(summary)
+}
+
+fn rom_item(relative: &Path) -> PathBuf {
+    let mut components = relative.components();
+    let Some(console) = components.next() else { return relative.to_path_buf() };
+    let mut item = PathBuf::from(console.as_os_str());
+    if let Some(game) = components.next() {
+        item.push(game.as_os_str());
+    }
+    item
 }
 
 fn recursive_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -335,7 +360,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(announced.load(Ordering::Relaxed), 10);
-        assert_eq!(summary.copied_roms, 1);
+        assert_eq!(summary.updated_rom_items, 1);
+        assert_eq!(summary.copied_rom_files, 1);
         assert_eq!(summary.moved_packages, 1);
         assert_eq!(fs::read(drive.join("Roms/N64/game.z64")).unwrap(), b"rom");
         assert_eq!(fs::read(drive.join("game.pkg")).unwrap(), b"package");
@@ -357,8 +383,41 @@ mod tests {
         fs::write(roms.join("SNES/game.sfc"), b"same").unwrap();
         fs::write(drive.join("Roms/SNES/game.sfc"), b"same").unwrap();
         let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
-        assert_eq!(summary.skipped_roms, 1);
+        assert_eq!(summary.unchanged_rom_items, 1);
+        assert_eq!(summary.skipped_rom_files, 1);
         assert!(roms.join("SNES/game.sfc").is_file());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn groups_directory_format_rom_files_as_one_game() {
+        let root = std::env::temp_dir().join(format!("conduit-removable-group-test-{}", uuid::Uuid::new_v4()));
+        let roms = root.join("local/Roms");
+        let packages = root.join("local/PS4");
+        let drive = root.join("drive");
+        let game = roms.join("Wii U/Twilight Princess");
+        fs::create_dir_all(game.join("code")).unwrap();
+        fs::create_dir_all(game.join("content")).unwrap();
+        fs::create_dir_all(game.join("meta")).unwrap();
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(&drive).unwrap();
+        fs::write(game.join("code/game.rpx"), b"code").unwrap();
+        fs::write(game.join("content/data.app"), b"content").unwrap();
+        fs::write(game.join("meta/meta.xml"), b"meta").unwrap();
+
+        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(summary.updated_rom_items, 1);
+        assert_eq!(summary.copied_rom_files, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parses_the_insufficient_space_shortfall_for_notifications() {
+        assert_eq!(
+            insufficient_space_needed(
+                "The SSD needs 12961617162 more bytes for this sync (73056032010 required, 60094414848 available)"
+            ),
+            Some(12_961_617_162)
+        );
     }
 }
