@@ -202,6 +202,10 @@ fn candidate_files(
     db_path: &Path,
     background: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    let organizes_downloads = workflow
+        .nodes
+        .iter()
+        .any(|node| node.data.node_type == "organize_downloads");
     let explicit = workflow
         .nodes
         .iter()
@@ -233,7 +237,7 @@ fn candidate_files(
                 .map_err(|error| format!("Cannot read {}: {error}", path.display()))?
                 .filter_map(Result::ok)
                 .map(|entry| entry.path())
-                .filter(|entry| entry.is_file())
+                .filter(|entry| entry.is_file() || (organizes_downloads && entry.is_dir()))
                 .take(max_files * 2)
                 .collect()
         } else {
@@ -242,7 +246,7 @@ fn candidate_files(
     } else if let Some(paths) = event_paths {
         paths
             .iter()
-            .filter(|path| path.is_file())
+            .filter(|path| path.is_file() || (organizes_downloads && path.is_dir()))
             .map(|path| assert_allowed(path, permissions))
             .collect::<Result<Vec<_>, _>>()?
     } else if let Some(folder) = folder {
@@ -251,7 +255,7 @@ fn candidate_files(
             .map_err(|error| format!("Cannot read {}: {error}", directory.display()))?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| path.is_file())
+            .filter(|path| path.is_file() || (organizes_downloads && path.is_dir()))
             .take(max_files * 2)
             .collect()
     } else {
@@ -259,11 +263,7 @@ fn candidate_files(
     };
 
     candidates.retain(|file| {
-        let incomplete_download = workflow
-            .nodes
-            .iter()
-            .any(|node| node.data.node_type == "organize_downloads")
-            && downloads::is_incomplete_download(file);
+        let incomplete_download = organizes_downloads && downloads::is_incomplete_download(file);
         !incomplete_download
             && condition_matches(workflow, file)
             && (!background || !database::was_processed(db_path, &workflow.id, file).unwrap_or(false))
@@ -366,6 +366,10 @@ fn plan_operations(
                             action = "extract_rom_archive".into();
                             Some(assert_allowed(&directory, permissions)?)
                         }
+                        Some(downloads::Organization::ExtractPackage(directory)) => {
+                            action = "extract_package_archive".into();
+                            Some(assert_allowed(&directory, permissions)?)
+                        }
                         None => None,
                     },
                     _ => None,
@@ -388,6 +392,9 @@ fn plan_operations(
                     warning: match action.as_str() {
                         "move" | "organize_downloads" => Some("Original file will be moved".into()),
                         "extract_rom_archive" => Some("ROMs will be extracted and the source archive deleted after success".into()),
+                        "extract_package_archive" => {
+                            Some("PS4 package files will be extracted and the source archive deleted after success".into())
+                        }
                         "trash" => Some("File will be sent to desktop trash".into()),
                         "http_request" => Some("External effects cannot be undone".into()),
                         _ => None,
@@ -425,7 +432,12 @@ fn plan_operations(
         .any(|node| node.data.node_type == "organize_downloads");
     let organized_download = operations
         .iter()
-        .any(|operation| matches!(operation.action.as_str(), "organize_downloads" | "extract_rom_archive"));
+        .any(|operation| {
+            matches!(
+                operation.action.as_str(),
+                "organize_downloads" | "extract_rom_archive" | "extract_package_archive"
+            )
+        });
     if has_download_organizer && !organized_download {
         operations.retain(|operation| operation.action != "notification");
     }
@@ -491,6 +503,11 @@ fn perform_operations(
             "extract_rom_archive" => {
                 if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
                     downloads::extract_rom_archive(Path::new(source), Path::new(destination))?;
+                }
+            }
+            "extract_package_archive" => {
+                if let (Some(source), Some(destination)) = (&operation.source, &operation.destination) {
+                    downloads::extract_package_archive(Path::new(source), Path::new(destination))?;
                 }
             }
             "create_directory" => {
@@ -669,6 +686,7 @@ pub(crate) fn execute(
         "create_directory", "copy", "move", "rename", "write_text", "checksum", "notification", "trash",
         "compress", "extract", "http_request", "media_convert", "git_summary", "ocr", "document_metadata",
         "organize_downloads", "file_inventory", "kmail_cleanup", "sync_removable_library",
+        "extract_rom_archive", "extract_package_archive",
     ];
     let node_statuses = ordered
         .into_iter()

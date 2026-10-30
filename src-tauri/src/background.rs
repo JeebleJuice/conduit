@@ -263,7 +263,10 @@ fn run_loop(
                     .any(|node| node.data.node_type == "organize_downloads");
                 let ready: Vec<PathBuf> = paths
                     .into_iter()
-                    .filter(|path| path.is_file() && (!organizes_downloads || !downloads::is_incomplete_download(path)))
+                    .filter(|path| {
+                        (path.is_file() || (organizes_downloads && path.is_dir()))
+                            && (!organizes_downloads || !downloads::is_incomplete_download(path))
+                    })
                     .collect();
                 if !ready.is_empty() {
                     let _ = run_with_retries(
@@ -286,7 +289,9 @@ fn run_loop(
                 let current = folder_fingerprint(&folder);
                 let changed = fingerprints
                     .insert(workflow.id.clone(), current)
-                    .is_none_or(|previous| previous != current);
+                    .is_none_or(|previous| previous != current)
+                    || (workflow.nodes.iter().any(|node| node.data.node_type == "organize_downloads")
+                        && downloads::has_wii_u_directory(&folder));
                 if changed && !recently_ran(&mut cooldowns, &workflow.id) {
                     let _ = run_with_retries(db_path, workflow, "reconciliation", None, cancelled, execution_lock, app, None);
                 }

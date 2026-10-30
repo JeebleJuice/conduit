@@ -25,7 +25,7 @@ The project now covers the original release stages and advanced-node roadmap:
 - drive-mounted and loopback webhook triggers;
 - desktop notifications and honest, journalled Undo;
 - safe ZIP creation/extraction and desktop-trash actions;
-- completed-download detection plus console-aware ROM extraction—including Wii U disc images and extracted game layouts—into `~/Programs/Roms`, and PS4 `.pkg` routing into `~/Programs/PS4`;
+- completed-download detection plus console-aware ROM extraction—including Wii U disc images, archives, and settled loose `code/content/meta` game directories—into `~/Programs/Roms`, direct PS4 `.pkg` routing into `~/Programs/PS4`, and safe ZIP/7z/RAR5 package extraction into that same folder;
 - label-and-UUID matched PS4USB synchronization that copies the ROM directory tree, atomically moves verified `.pkg` files to the SSD root, and automatically retries an insufficient-space sync after files are deleted from the still-mounted drive;
 - HTTPS requests with OS-keyring bearer secrets, timeouts, redirect limits, and response limits;
 - FFmpeg conversion, Git summaries, Tesseract OCR, and ExifTool metadata nodes;

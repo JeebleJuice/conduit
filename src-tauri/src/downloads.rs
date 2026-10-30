@@ -4,6 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::Duration,
 };
 use zip::ZipArchive;
 
@@ -14,14 +15,34 @@ const ROM_ARCHIVE_LIMIT: u64 = 100 * 1024 * 1024 * 1024;
 pub(crate) enum Organization {
     Move(PathBuf),
     ExtractRom(PathBuf),
+    ExtractPackage(PathBuf),
 }
 
 pub(crate) fn is_incomplete_download(source: &Path) -> bool {
+    if source.is_dir() {
+        return !is_wii_u_layout(source) || !directory_is_settled(source, Duration::from_secs(30));
+    }
     matches!(extension(source).as_str(), "part" | "crdownload" | "download" | "tmp")
         || source.metadata().map(|metadata| metadata.len() == 0).unwrap_or(true)
 }
 
+pub(crate) fn has_wii_u_directory(folder: &Path) -> bool {
+    fs::read_dir(folder)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().is_dir() && is_wii_u_layout(&entry.path()))
+}
+
 pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<Organization>, String> {
+    if source.is_dir() {
+        return if is_wii_u_layout(source) {
+            Ok(Some(Organization::Move(root(node, "romsRoot", "~/Programs/Roms")?.join("Wii U"))))
+        } else {
+            Ok(None)
+        };
+    }
     let extension = extension(source);
     if is_incomplete_download(source) {
         return Ok(None);
@@ -35,8 +56,16 @@ pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<
             root(node, "romsRoot", "~/Programs/Roms")?.join(console),
         )));
     }
-    if matches!(extension.as_str(), "zip" | "7z") {
-        if let Some(console) = rom_archive_console(source)? {
+    if matches!(extension.as_str(), "zip" | "7z" | "rar") {
+        let entries = archive_entries(source)?;
+        if entries.iter().any(|entry| {
+            Path::new(entry)
+                .extension()
+                .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("pkg"))
+        }) {
+            return Ok(Some(Organization::ExtractPackage(root(node, "ps4Root", "~/Programs/PS4")?)));
+        }
+        if let Some(console) = rom_archive_console(source, &entries) {
             return Ok(Some(Organization::ExtractRom(
                 root(node, "romsRoot", "~/Programs/Roms")?.join(console),
             )));
@@ -44,6 +73,42 @@ pub(crate) fn organization(source: &Path, node: &WorkflowNode) -> Result<Option<
     }
 
     destination(source, node).map(|destination| destination.map(Organization::Move))
+}
+
+fn is_wii_u_layout(root: &Path) -> bool {
+    ["code", "content", "meta"].iter().all(|name| {
+        fs::read_dir(root).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
+            entry.path().is_dir() && entry.file_name().to_string_lossy().eq_ignore_ascii_case(name)
+        })
+    })
+}
+
+fn directory_is_settled(root: &Path, quiet_for: Duration) -> bool {
+    let mut directories = vec![root.to_path_buf()];
+    let mut newest = None;
+    let mut entries_seen = 0_usize;
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(directory) else { return false };
+        for entry in entries.flatten() {
+            entries_seen += 1;
+            if entries_seen > 200_000 {
+                return false;
+            }
+            let path = entry.path();
+            let Ok(metadata) = path.symlink_metadata() else { return false };
+            if metadata.file_type().is_symlink() {
+                return false;
+            }
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if let Ok(modified) = metadata.modified() {
+                newest = Some(newest.map_or(modified, |current: std::time::SystemTime| current.max(modified)));
+            }
+        }
+    }
+    newest
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed >= quiet_for)
 }
 
 pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<PathBuf>, String> {
@@ -142,8 +207,7 @@ fn direct_rom_console(source: &Path, extension: &str) -> Option<&'static str> {
     }
 }
 
-fn rom_archive_console(source: &Path) -> Result<Option<&'static str>, String> {
-    let entries = archive_entries(source)?;
+fn rom_archive_console(source: &Path, entries: &[String]) -> Option<&'static str> {
     let has_cue = entries.iter().any(|entry| extension(Path::new(entry)) == "cue");
     let has_wii_u_layout = ["code", "content", "meta"].iter().all(|expected| {
         entries.iter().any(|entry| {
@@ -153,9 +217,9 @@ fn rom_archive_console(source: &Path) -> Result<Option<&'static str>, String> {
         })
     });
     if has_wii_u_layout {
-        return Ok(Some("Wii U"));
+        return Some("Wii U");
     }
-    for entry in &entries {
+    for entry in entries {
         let entry_extension = extension(Path::new(entry));
         let console = match entry_extension.as_str() {
             "nes" => Some("NES"),
@@ -170,10 +234,10 @@ fn rom_archive_console(source: &Path) -> Result<Option<&'static str>, String> {
             _ => None,
         };
         if console.is_some() {
-            return Ok(console);
+            return console;
         }
     }
-    Ok(None)
+    None
 }
 
 fn disc_console(prefix: &[u8]) -> Option<&'static str> {
@@ -197,7 +261,7 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
     if let Ok(file) = fs::File::open(source) {
         if let Ok(mut archive) = ZipArchive::new(file) {
             if archive.len() > 10_000 {
-                return Err("ROM archive exceeded the 10,000 entry safety limit".into());
+                return Err("Download archive exceeded the 10,000 entry safety limit".into());
             }
             let mut entries = Vec::new();
             let mut total = 0_u64;
@@ -205,7 +269,7 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
                 let entry = archive.by_index(index).map_err(|error| error.to_string())?;
                 total = total.saturating_add(entry.size());
                 if total > ROM_ARCHIVE_LIMIT {
-                    return Err("ROM archive exceeded the 100 GB extraction safety limit".into());
+                    return Err("Download archive exceeded the 100 GB extraction safety limit".into());
                 }
                 validate_relative_path(Path::new(entry.name()))?;
                 entries.push(entry.name().to_owned());
@@ -220,6 +284,9 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|error| format!("Cannot inspect {} with 7z: {error}", source.display()))?;
+    if !output.status.success() && extension(source) == "rar" {
+        return lsar_entries(source);
+    }
     if !output.status.success() {
         return Err(format!(
             "Cannot inspect {} as a completed archive: {}",
@@ -233,7 +300,7 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
         .filter_map(|line| line.strip_prefix("Path = ").map(str::to_owned))
         .collect();
     if entries.len() > 10_000 {
-        return Err("ROM archive exceeded the 10,000 entry safety limit".into());
+        return Err("Download archive exceeded the 10,000 entry safety limit".into());
     }
     for entry in &entries {
         validate_relative_path(Path::new(entry))?;
@@ -244,7 +311,44 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
         .filter_map(|size| size.parse::<u64>().ok())
         .fold(0_u64, u64::saturating_add);
     if total > ROM_ARCHIVE_LIMIT {
-        return Err("ROM archive exceeded the 100 GB extraction safety limit".into());
+        return Err("Download archive exceeded the 100 GB extraction safety limit".into());
+    }
+    Ok(entries)
+}
+
+fn lsar_entries(source: &Path) -> Result<Vec<String>, String> {
+    let output = Command::new("lsar")
+        .args(["-json", "--"])
+        .arg(source)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("Cannot inspect {} with lsar: {error}", source.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cannot inspect {} as a completed RAR archive: {}",
+            source.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let listing: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Cannot read the RAR listing for {}: {error}", source.display()))?;
+    let contents = listing
+        .get("lsarContents")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("RAR listing for {} has no contents", source.display()))?;
+    if contents.len() > 10_000 {
+        return Err("Download archive exceeded the 10,000 entry safety limit".into());
+    }
+    let mut entries = Vec::with_capacity(contents.len());
+    let mut total = 0_u64;
+    for entry in contents {
+        let Some(name) = entry.get("XADFileName").and_then(serde_json::Value::as_str) else { continue };
+        validate_relative_path(Path::new(name))?;
+        total = total.saturating_add(entry.get("XADFileSize").and_then(serde_json::Value::as_u64).unwrap_or_default());
+        if total > ROM_ARCHIVE_LIMIT {
+            return Err("Download archive exceeded the 100 GB extraction safety limit".into());
+        }
+        entries.push(name.to_owned());
     }
     Ok(entries)
 }
@@ -288,13 +392,21 @@ fn validate_relative_path(path: &Path) -> Result<(), String> {
             )
         })
     {
-        Err("ROM archive contains an unsafe path".into())
+        Err("Download archive contains an unsafe path".into())
     } else {
         Ok(())
     }
 }
 
 pub(crate) fn extract_rom_archive(source: &Path, destination: &Path) -> Result<(), String> {
+    extract_download_archive(source, destination, false)
+}
+
+pub(crate) fn extract_package_archive(source: &Path, destination: &Path) -> Result<(), String> {
+    extract_download_archive(source, destination, true)
+}
+
+fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) -> Result<(), String> {
     let _ = archive_entries(source)?;
     let parent = destination.parent().ok_or("ROM destination has no parent folder")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -304,11 +416,20 @@ pub(crate) fn extract_rom_archive(source: &Path, destination: &Path) -> Result<(
 
     let extraction = extract_archive_to(source, &staging).and_then(|_| {
         validate_extracted_tree(&staging)?;
-        let entries = fs::read_dir(&staging).map_err(|error| error.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|error| error.to_string())?;
-            let target = collision_safe(destination.join(entry.file_name()));
-            fs::rename(entry.path(), target).map_err(|error| error.to_string())?;
+        if flatten {
+            let mut files = recursive_extracted_files(&staging)?;
+            files.sort();
+            for file in files {
+                let target = collision_safe(destination.join(file.file_name().ok_or("An extracted file has no filename")?));
+                fs::rename(file, target).map_err(|error| error.to_string())?;
+            }
+        } else {
+            let entries = fs::read_dir(&staging).map_err(|error| error.to_string())?;
+            for entry in entries {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let target = collision_safe(destination.join(entry.file_name()));
+                fs::rename(entry.path(), target).map_err(|error| error.to_string())?;
+            }
         }
         fs::remove_file(source).map_err(|error| format!("ROMs were extracted, but the archive could not be deleted: {error}"))
     });
@@ -321,7 +442,7 @@ fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
         if let Ok(mut archive) = ZipArchive::new(file) {
             for index in 0..archive.len() {
                 let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
-                let relative = entry.enclosed_name().ok_or("ROM archive contains an unsafe path")?;
+                let relative = entry.enclosed_name().ok_or("Download archive contains an unsafe path")?;
                 let output = destination.join(relative);
                 if entry.is_dir() {
                     fs::create_dir_all(output).map_err(|error| error.to_string())?;
@@ -335,6 +456,21 @@ fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
             }
             return Ok(());
         }
+    }
+    if extension(source) == "rar" {
+        let output = Command::new("unar")
+            .args(["-quiet", "-force-overwrite", "-no-directory", "-output-directory"])
+            .arg(destination)
+            .arg("--")
+            .arg(source)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("Cannot extract {} with unar: {error}", source.display()))?;
+        return if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("unar extraction failed: {}", String::from_utf8_lossy(&output.stderr).trim()))
+        };
     }
     let output = Command::new("7z")
         .arg("x")
@@ -352,6 +488,22 @@ fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
     }
 }
 
+fn recursive_extracted_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut directories = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+                directories.push(entry.path());
+            } else {
+                files.push(entry.path());
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn validate_extracted_tree(root: &Path) -> Result<(), String> {
     let mut pending = vec![root.to_path_buf()];
     let mut count = 0_usize;
@@ -361,18 +513,18 @@ fn validate_extracted_tree(root: &Path) -> Result<(), String> {
             let entry = entry.map_err(|error| error.to_string())?;
             let metadata = entry.path().symlink_metadata().map_err(|error| error.to_string())?;
             if metadata.file_type().is_symlink() {
-                return Err("ROM archive contains a symbolic link".into());
+                return Err("Download archive contains a symbolic link".into());
             }
             count += 1;
             if count > 10_000 {
-                return Err("ROM archive exceeded the 10,000 entry safety limit".into());
+                return Err("Download archive exceeded the 10,000 entry safety limit".into());
             }
             if metadata.is_dir() {
                 pending.push(entry.path());
             } else {
                 total = total.saturating_add(metadata.len());
                 if total > ROM_ARCHIVE_LIMIT {
-                    return Err("ROM archive exceeded the 100 GB extraction safety limit".into());
+                    return Err("Download archive exceeded the 100 GB extraction safety limit".into());
                 }
             }
         }
@@ -606,6 +758,57 @@ mod tests {
             organization(&source, &node(&root)).unwrap(),
             Some(Organization::ExtractRom(root.join("Programs/Roms/Wii U")))
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn extracts_packages_from_an_archive_into_the_ps4_root() {
+        let root = std::env::temp_dir().join(format!("conduit-package-archive-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("theme.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("Theme/Theme-1.pkg", SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"first package").unwrap();
+        archive.start_file("Theme/Theme-2.pkg", SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"second package").unwrap();
+        archive.start_file("Theme/cover.jpg", SimpleFileOptions::default()).unwrap();
+        archive.write_all(b"cover").unwrap();
+        archive.finish().unwrap();
+
+        let destination = root.join("Programs/PS4");
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::ExtractPackage(destination.clone()))
+        );
+        extract_package_archive(&source, &destination).unwrap();
+        assert_eq!(fs::read(destination.join("Theme-1.pkg")).unwrap(), b"first package");
+        assert_eq!(fs::read(destination.join("Theme-2.pkg")).unwrap(), b"second package");
+        assert_eq!(fs::read(destination.join("cover.jpg")).unwrap(), b"cover");
+        assert!(!source.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_a_loose_wii_u_game_directory_as_one_download() {
+        let root = std::env::temp_dir().join(format!("conduit-loose-wii-u-test-{}", uuid::Uuid::new_v4()));
+        let source = root.join("Tropical Freeze");
+        for folder in ["code", "content", "meta"] {
+            fs::create_dir_all(source.join(folder)).unwrap();
+        }
+        fs::write(source.join("code/game.rpx"), b"transferring").unwrap();
+
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::Move(root.join("Programs/Roms/Wii U")))
+        );
+        assert!(is_incomplete_download(&source), "a newly written directory must wait for its quiet period");
+        assert!(has_wii_u_directory(&root));
+        fs::File::open(source.join("code/game.rpx"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(31))
+            .unwrap();
+        assert!(!is_incomplete_download(&source), "the complete quiet directory should become ready");
         fs::remove_dir_all(root).unwrap();
     }
 

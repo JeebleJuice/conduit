@@ -135,7 +135,12 @@ fn organizer_notification(result: &EngineResult) -> Option<(String, String)> {
     let organized: Vec<&PreviewOperation> = result
         .operations
         .iter()
-        .filter(|operation| matches!(operation.action.as_str(), "organize_downloads" | "extract_rom_archive"))
+        .filter(|operation| {
+            matches!(
+                operation.action.as_str(),
+                "organize_downloads" | "extract_rom_archive" | "extract_package_archive"
+            )
+        })
         .collect();
     if organized.is_empty() {
         return None;
@@ -144,7 +149,9 @@ fn organizer_notification(result: &EngineResult) -> Option<(String, String)> {
     let mut lines: Vec<String> = organized.iter().take(4).filter_map(|operation| {
         let source = Path::new(operation.source.as_deref()?).file_name()?.to_string_lossy();
         let destination = compact_path(operation.destination.as_deref()?);
-        let suffix = (operation.action == "extract_rom_archive").then_some(" (extracted)").unwrap_or_default();
+        let suffix = matches!(operation.action.as_str(), "extract_rom_archive" | "extract_package_archive")
+            .then_some(" (extracted)")
+            .unwrap_or_default();
         Some(format!("{} → {}{}", truncate(&source, 52), truncate(&destination, 76), suffix))
     }).collect();
     if organized.len() > lines.len() {
