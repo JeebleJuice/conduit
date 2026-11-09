@@ -11,6 +11,8 @@ use zip::ZipArchive;
 const SAMPLE_LIMIT: u64 = 256 * 1024;
 const ROM_ARCHIVE_LIMIT: u64 = 100 * 1024 * 1024 * 1024;
 const ISO_SAMPLE_LIMIT: usize = 2 * 1024 * 1024;
+const STANDARD_ARCHIVE_ENTRY_LIMIT: usize = 10_000;
+const WII_U_ARCHIVE_ENTRY_LIMIT: usize = 100_000;
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum Organization {
@@ -272,14 +274,7 @@ fn direct_rom_console(source: &Path, extension: &str) -> Option<&'static str> {
 
 fn rom_archive_console(source: &Path, entries: &[String]) -> Option<&'static str> {
     let has_cue = entries.iter().any(|entry| extension(Path::new(entry)) == "cue");
-    let has_wii_u_layout = ["code", "content", "meta"].iter().all(|expected| {
-        entries.iter().any(|entry| {
-            Path::new(entry).components().any(|component| {
-                component.as_os_str().to_string_lossy().eq_ignore_ascii_case(expected)
-            })
-        })
-    });
-    if has_wii_u_layout {
+    if has_wii_u_archive_layout(entries) {
         return Some("Wii U");
     }
     for entry in entries {
@@ -336,13 +331,15 @@ fn file_prefix(path: &Path, limit: usize) -> Vec<u8> {
 fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
     if let Ok(file) = fs::File::open(source) {
         if let Ok(mut archive) = ZipArchive::new(file) {
-            if archive.len() > 10_000 {
-                return Err("Download archive exceeded the 10,000 entry safety limit".into());
+            if archive.len() > WII_U_ARCHIVE_ENTRY_LIMIT {
+                return Err("Download archive exceeded the 100,000 entry safety limit".into());
             }
             let mut entries = Vec::new();
             let mut total = 0_u64;
             for index in 0..archive.len() {
-                let entry = archive.by_index(index).map_err(|error| error.to_string())?;
+                // Listing must not require Rust's ZIP decoder to support the entry's
+                // compression method. Extraction can fall back to 7z below.
+                let entry = archive.by_index_raw(index).map_err(|error| error.to_string())?;
                 total = total.saturating_add(entry.size());
                 if total > ROM_ARCHIVE_LIMIT {
                     return Err("Download archive exceeded the 100 GB extraction safety limit".into());
@@ -350,6 +347,7 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
                 validate_relative_path(Path::new(entry.name()))?;
                 entries.push(entry.name().to_owned());
             }
+            archive_entry_limit(&entries)?;
             return Ok(entries);
         }
     }
@@ -375,9 +373,6 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
         .lines()
         .filter_map(|line| line.strip_prefix("Path = ").map(str::to_owned))
         .collect();
-    if entries.len() > 10_000 {
-        return Err("Download archive exceeded the 10,000 entry safety limit".into());
-    }
     for entry in &entries {
         validate_relative_path(Path::new(entry))?;
     }
@@ -389,6 +384,7 @@ fn archive_entries(source: &Path) -> Result<Vec<String>, String> {
     if total > ROM_ARCHIVE_LIMIT {
         return Err("Download archive exceeded the 100 GB extraction safety limit".into());
     }
+    archive_entry_limit(&entries)?;
     Ok(entries)
 }
 
@@ -412,8 +408,8 @@ fn lsar_entries(source: &Path) -> Result<Vec<String>, String> {
         .get("lsarContents")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| format!("RAR listing for {} has no contents", source.display()))?;
-    if contents.len() > 10_000 {
-        return Err("Download archive exceeded the 10,000 entry safety limit".into());
+    if contents.len() > WII_U_ARCHIVE_ENTRY_LIMIT {
+        return Err("Download archive exceeded the 100,000 entry safety limit".into());
     }
     let mut entries = Vec::with_capacity(contents.len());
     let mut total = 0_u64;
@@ -426,7 +422,36 @@ fn lsar_entries(source: &Path) -> Result<Vec<String>, String> {
         }
         entries.push(name.to_owned());
     }
+    archive_entry_limit(&entries)?;
     Ok(entries)
+}
+
+fn has_wii_u_archive_layout(entries: &[String]) -> bool {
+    ["code", "content", "meta"].iter().all(|expected| {
+        entries.iter().any(|entry| {
+            Path::new(entry).components().any(|component| {
+                component.as_os_str().to_string_lossy().eq_ignore_ascii_case(expected)
+            })
+        })
+    })
+}
+
+fn archive_entry_limit(entries: &[String]) -> Result<usize, String> {
+    let limit = if has_wii_u_archive_layout(entries) {
+        WII_U_ARCHIVE_ENTRY_LIMIT
+    } else {
+        STANDARD_ARCHIVE_ENTRY_LIMIT
+    };
+    if entries.len() > limit {
+        let message = if limit == STANDARD_ARCHIVE_ENTRY_LIMIT {
+            "Download archive exceeded the 10,000 entry safety limit; only recognized Wii U code/content/meta archives may contain more entries"
+        } else {
+            "Download archive exceeded the 100,000 entry safety limit for Wii U archives"
+        };
+        Err(message.into())
+    } else {
+        Ok(limit)
+    }
 }
 
 fn archive_entry_prefix(source: &Path, entry_name: &str, limit: usize) -> Vec<u8> {
@@ -483,7 +508,8 @@ pub(crate) fn extract_package_archive(source: &Path, destination: &Path) -> Resu
 }
 
 fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) -> Result<(), String> {
-    let _ = archive_entries(source)?;
+    let entries = archive_entries(source)?;
+    let entry_limit = archive_entry_limit(&entries)?;
     let parent = destination.parent().ok_or("ROM destination has no parent folder")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
@@ -491,7 +517,7 @@ fn extract_download_archive(source: &Path, destination: &Path, flatten: bool) ->
     fs::create_dir(&staging).map_err(|error| error.to_string())?;
 
     let extraction = extract_archive_to(source, &staging).and_then(|_| {
-        validate_extracted_tree(&staging)?;
+        validate_extracted_tree(&staging, entry_limit)?;
         normalize_single_wii_u_disc_name(source, &staging)?;
         if flatten {
             let mut files = recursive_extracted_files(&staging)?;
@@ -540,8 +566,16 @@ fn normalize_single_wii_u_disc_name(source: &Path, staging: &Path) -> Result<(),
 fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
     if let Ok(file) = fs::File::open(source) {
         if let Ok(mut archive) = ZipArchive::new(file) {
+            let mut native_supported = true;
             for index in 0..archive.len() {
-                let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+                let mut entry = match archive.by_index(index) {
+                    Ok(entry) => entry,
+                    Err(zip::result::ZipError::UnsupportedArchive(_)) => {
+                        native_supported = false;
+                        break;
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
                 let relative = entry.enclosed_name().ok_or("Download archive contains an unsafe path")?;
                 let output = destination.join(relative);
                 if entry.is_dir() {
@@ -554,7 +588,9 @@ fn extract_archive_to(source: &Path, destination: &Path) -> Result<(), String> {
                     std::io::copy(&mut entry, &mut file).map_err(|error| error.to_string())?;
                 }
             }
-            return Ok(());
+            if native_supported {
+                return Ok(());
+            }
         }
     }
     if extension(source) == "rar" {
@@ -604,7 +640,7 @@ fn recursive_extracted_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn validate_extracted_tree(root: &Path) -> Result<(), String> {
+fn validate_extracted_tree(root: &Path, entry_limit: usize) -> Result<(), String> {
     let mut pending = vec![root.to_path_buf()];
     let mut count = 0_usize;
     let mut total = 0_u64;
@@ -616,8 +652,8 @@ fn validate_extracted_tree(root: &Path) -> Result<(), String> {
                 return Err("Download archive contains a symbolic link".into());
             }
             count += 1;
-            if count > 10_000 {
-                return Err("Download archive exceeded the 10,000 entry safety limit".into());
+            if count > entry_limit {
+                return Err(format!("Download archive exceeded the {entry_limit} entry safety limit"));
             }
             if metadata.is_dir() {
                 pending.push(entry.path());
@@ -904,6 +940,37 @@ mod tests {
             Some(Organization::ExtractRom(root.join("Programs/Roms/Wii U")))
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn permits_large_recognized_wii_u_archives() {
+        let root = std::env::temp_dir().join(format!("conduit-large-wii-u-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Breath of the Wild Update.zip");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for directory in ["Update/code/", "Update/content/", "Update/meta/"] {
+            archive.add_directory(directory, options).unwrap();
+        }
+        for index in 0..STANDARD_ARCHIVE_ENTRY_LIMIT {
+            archive.start_file(format!("Update/content/file-{index}.bin"), options).unwrap();
+        }
+        archive.finish().unwrap();
+
+        assert_eq!(
+            organization(&source, &node(&root)).unwrap(),
+            Some(Organization::ExtractRom(root.join("Programs/Roms/Wii U")))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_standard_limit_for_unrecognized_archives() {
+        let entries: Vec<String> = (0..=STANDARD_ARCHIVE_ENTRY_LIMIT)
+            .map(|index| format!("ordinary/file-{index}.bin"))
+            .collect();
+        assert!(archive_entry_limit(&entries).is_err());
     }
 
     #[test]

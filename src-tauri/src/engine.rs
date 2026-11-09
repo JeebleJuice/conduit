@@ -364,7 +364,9 @@ fn plan_operations(
                     "compress" => destination.clone().map(collision_safe),
                     "extract" => destination.clone(),
                     "checksum" => Some(collision_safe(PathBuf::from(format!("{}.sha256", source.display())))),
-                    "organize_downloads" => match downloads::organization(&source, node)? {
+                    "organize_downloads" => match downloads::organization(&source, node)
+                        .map_err(|error| format!("{}: {error}", source.display()))?
+                    {
                         Some(downloads::Organization::Move(directory)) => {
                             Some(collision_safe(assert_allowed(&directory, permissions)?.join(source.file_name().unwrap_or_default())))
                         }

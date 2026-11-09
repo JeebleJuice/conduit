@@ -35,11 +35,13 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
 };
+
+static NOTIFIED_FAILURES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 pub(crate) fn spawn(
     db_path: PathBuf,
@@ -534,6 +536,7 @@ fn run_with_retries(
             Some(&progress_notification),
         ) {
             Ok(result) => {
+                clear_notified_failure(&workflow.id);
                 if let Some(app) = app {
                     crate::send_notifications(app, &result);
                 }
@@ -552,18 +555,25 @@ fn run_with_retries(
     }
     if let Some(error) = final_error {
         let _ = database::record_failure(db_path, workflow, trigger, &error);
-        if workflow.id == "ps4usb-library-sync" {
+        if should_notify_failure(&workflow.id, &error) {
             if let Some(app) = app {
-                let (title, body) = if let Some(bytes) = removable::insufficient_space_needed(&error) {
-                    (
-                        "PS4USB sync waiting for space",
-                        format!(
-                            "The SSD needs {} more. Delete installed packages while it remains connected; Conduit will retry automatically.",
-                            format_bytes(bytes)
-                        ),
-                    )
+                let (title, body) = if workflow.id == "ps4usb-library-sync" {
+                    if let Some(bytes) = removable::insufficient_space_needed(&error) {
+                        (
+                            "PS4USB sync waiting for space".to_owned(),
+                            format!(
+                                "The SSD needs {} more. Delete installed packages while it remains connected; Conduit will retry automatically.",
+                                format_bytes(bytes)
+                            ),
+                        )
+                    } else {
+                        ("PS4USB sync failed".to_owned(), error.clone())
+                    }
                 } else {
-                    ("PS4USB sync failed", error.clone())
+                    (
+                        format!("{} failed", workflow.name),
+                        format!("{trigger}: {error}"),
+                    )
                 };
                 let _ = app.notification().builder().title(title).body(body).show();
             }
@@ -571,6 +581,25 @@ fn run_with_retries(
         Err(error)
     } else {
         Ok(())
+    }
+}
+
+fn should_notify_failure(workflow_id: &str, error: &str) -> bool {
+    let notified = NOTIFIED_FAILURES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut notified) = notified.lock() else { return true };
+    if notified.get(workflow_id).is_some_and(|previous| previous == error) {
+        false
+    } else {
+        notified.insert(workflow_id.to_owned(), error.to_owned());
+        true
+    }
+}
+
+fn clear_notified_failure(workflow_id: &str) {
+    if let Some(notified) = NOTIFIED_FAILURES.get() {
+        if let Ok(mut notified) = notified.lock() {
+            notified.remove(workflow_id);
+        }
     }
 }
 
@@ -634,6 +663,17 @@ mod tests {
 
         assert!(!pending.observe_available_space(150, started + Duration::from_secs(4)));
         assert_eq!(pending.space_increased_at, None);
+    }
+
+    #[test]
+    fn repeated_identical_failures_notify_only_once_until_recovery() {
+        let workflow_id = format!("notification-test-{}", uuid::Uuid::new_v4());
+        assert!(should_notify_failure(&workflow_id, "first failure"));
+        assert!(!should_notify_failure(&workflow_id, "first failure"));
+        assert!(should_notify_failure(&workflow_id, "different failure"));
+        clear_notified_failure(&workflow_id);
+        assert!(should_notify_failure(&workflow_id, "first failure"));
+        clear_notified_failure(&workflow_id);
     }
 
     #[test]
