@@ -70,8 +70,22 @@ pub(crate) struct SyncSummary {
     pub updated_rom_items: usize,
     pub unchanged_rom_items: usize,
     pub copied_rom_files: usize,
+    pub relocated_rom_files: usize,
     pub skipped_rom_files: usize,
     pub moved_packages: usize,
+}
+
+pub(crate) struct TransferPlan {
+    pub bytes: u64,
+    pub rom_files: usize,
+    pub relocated_rom_files: usize,
+    pub packages: usize,
+}
+
+struct RomTransferPlan {
+    bytes: u64,
+    copies: usize,
+    relocations: usize,
 }
 
 pub(crate) fn sync_library(
@@ -79,7 +93,7 @@ pub(crate) fn sync_library(
     packages_source: &Path,
     destination_root: &Path,
     cancelled: &AtomicBool,
-    on_transfer_started: Option<&dyn Fn(u64)>,
+    on_transfer_started: Option<&dyn Fn(&TransferPlan)>,
 ) -> Result<SyncSummary, String> {
     if !roms_source.is_dir() {
         return Err(format!("ROM source is unavailable: {}", roms_source.display()));
@@ -102,8 +116,9 @@ pub(crate) fn sync_library(
     packages.sort();
 
     let roms_destination = destination_root.join("Roms");
-    let required = required_space(roms_source, &roms_destination, &rom_files)?
-        .saturating_add(required_space(packages_source, destination_root, &packages)?);
+    let rom_plan = required_rom_space(roms_source, &roms_destination, &rom_files)?;
+    let package_bytes = required_space(packages_source, destination_root, &packages)?;
+    let required = rom_plan.bytes.saturating_add(package_bytes);
     if let Some(available) = available_space(destination_root) {
         if required > available {
             return Err(format!(
@@ -114,9 +129,14 @@ pub(crate) fn sync_library(
             ));
         }
     }
-    if required > 0 {
+    if rom_plan.copies + rom_plan.relocations + packages.len() > 0 {
         if let Some(notify) = on_transfer_started {
-            notify(required);
+            notify(&TransferPlan {
+                bytes: required,
+                rom_files: rom_plan.copies,
+                relocated_rom_files: rom_plan.relocations,
+                packages: packages.len(),
+            });
         }
     }
 
@@ -124,6 +144,7 @@ pub(crate) fn sync_library(
         updated_rom_items: 0,
         unchanged_rom_items: 0,
         copied_rom_files: 0,
+        relocated_rom_files: 0,
         skipped_rom_files: 0,
         moved_packages: 0,
     };
@@ -134,15 +155,26 @@ pub(crate) fn sync_library(
         let relative = source.strip_prefix(roms_source).map_err(|error| error.to_string())?;
         let item = rom_item(relative);
         all_rom_items.insert(item.clone());
-        let destination = roms_destination.join(relative);
+        let destination = roms_destination.join(ssd_rom_relative(relative));
         if destination.exists() {
             ensure_matching_size(&source, &destination)?;
             summary.skipped_rom_files += 1;
             continue;
         }
-        copy_atomic(&source, &destination, cancelled)?;
+        if let Some(legacy) = legacy_ssd_rom_path(&roms_destination, relative).filter(|path| path.exists()) {
+            ensure_matching_size(&source, &legacy)?;
+            let parent = destination.parent().ok_or("A Dolphin-library destination has no parent folder")?;
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            fs::rename(&legacy, &destination).map_err(|error| {
+                format!("Could not reorganize {} into the SSD Dolphin library: {error}", legacy.display())
+            })?;
+            remove_empty_parents(legacy.parent(), &roms_destination);
+            summary.relocated_rom_files += 1;
+        } else {
+            copy_atomic(&source, &destination, cancelled)?;
+            summary.copied_rom_files += 1;
+        }
         updated_rom_items.insert(item);
-        summary.copied_rom_files += 1;
     }
     summary.updated_rom_items = updated_rom_items.len();
     summary.unchanged_rom_items = all_rom_items.difference(&updated_rom_items).count();
@@ -164,6 +196,32 @@ pub(crate) fn sync_library(
         summary.moved_packages += 1;
     }
     Ok(summary)
+}
+
+fn ssd_rom_relative(relative: &Path) -> PathBuf {
+    let mut components = relative.components();
+    let Some(console) = components.next() else { return relative.to_path_buf() };
+    let console_name = console.as_os_str().to_string_lossy();
+    if console_name.eq_ignore_ascii_case("Wii") || console_name.eq_ignore_ascii_case("GameCube") {
+        let mut mapped = PathBuf::from("Dolphin");
+        mapped.extend(components.map(|component| component.as_os_str()));
+        mapped
+    } else {
+        relative.to_path_buf()
+    }
+}
+
+fn legacy_ssd_rom_path(roms_destination: &Path, relative: &Path) -> Option<PathBuf> {
+    (ssd_rom_relative(relative) != relative).then(|| roms_destination.join(relative))
+}
+
+fn remove_empty_parents(mut current: Option<&Path>, stop: &Path) {
+    while let Some(directory) = current {
+        if directory == stop || fs::remove_dir(directory).is_err() {
+            break;
+        }
+        current = directory.parent();
+    }
 }
 
 fn rom_item(relative: &Path) -> PathBuf {
@@ -208,6 +266,35 @@ fn required_space(source_root: &Path, destination_root: &Path, files: &[PathBuf]
             Ok(total.saturating_add(source.metadata().map_err(|error| error.to_string())?.len()))
         }
     })
+}
+
+fn required_rom_space(source_root: &Path, destination_root: &Path, files: &[PathBuf]) -> Result<RomTransferPlan, String> {
+    let mut plan = RomTransferPlan { bytes: 0, copies: 0, relocations: 0 };
+    let mut destinations = HashMap::new();
+    for source in files {
+        let relative = source.strip_prefix(source_root).map_err(|error| error.to_string())?;
+        let mapped = ssd_rom_relative(relative);
+        if let Some(previous) = destinations.insert(mapped.clone(), relative.to_path_buf()) {
+            if previous != relative {
+                return Err(format!(
+                    "Wii and GameCube files would collide in the SSD Dolphin library: {} and {}",
+                    previous.display(),
+                    relative.display()
+                ));
+            }
+        }
+        let destination = destination_root.join(&mapped);
+        if destination.exists() {
+            ensure_matching_size(source, &destination)?;
+        } else if let Some(legacy) = legacy_ssd_rom_path(destination_root, relative).filter(|path| path.exists()) {
+            ensure_matching_size(source, &legacy)?;
+            plan.relocations += 1;
+        } else {
+            plan.bytes = plan.bytes.saturating_add(source.metadata().map_err(|error| error.to_string())?.len());
+            plan.copies += 1;
+        }
+    }
+    Ok(plan)
 }
 
 fn ensure_matching_size(source: &Path, destination: &Path) -> Result<(), String> {
@@ -350,7 +437,7 @@ mod tests {
         fs::write(packages.join("notes.txt"), b"keep").unwrap();
 
         let announced = AtomicU64::new(0);
-        let announce = |bytes| announced.store(bytes, Ordering::Relaxed);
+        let announce = |plan: &TransferPlan| announced.store(plan.bytes, Ordering::Relaxed);
         let summary = sync_library(
             &roms,
             &packages,
@@ -368,6 +455,63 @@ mod tests {
         assert!(roms.join("N64/game.z64").is_file());
         assert!(!packages.join("game.pkg").exists());
         assert!(packages.join("notes.txt").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn combines_wii_and_gamecube_files_in_the_ssd_dolphin_folder() {
+        let root = std::env::temp_dir().join(format!("conduit-dolphin-test-{}", uuid::Uuid::new_v4()));
+        let roms = root.join("local/Roms");
+        let packages = root.join("local/PS4");
+        let drive = root.join("drive");
+        fs::create_dir_all(roms.join("Wii")).unwrap();
+        fs::create_dir_all(roms.join("GameCube")).unwrap();
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(&drive).unwrap();
+        fs::write(roms.join("Wii/Galaxy.nkit.iso"), b"wii").unwrap();
+        fs::write(roms.join("GameCube/Sunshine.nkit.iso"), b"gamecube").unwrap();
+
+        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
+        assert_eq!(summary.copied_rom_files, 2);
+        assert_eq!(fs::read(drive.join("Roms/Dolphin/Galaxy.nkit.iso")).unwrap(), b"wii");
+        assert_eq!(fs::read(drive.join("Roms/Dolphin/Sunshine.nkit.iso")).unwrap(), b"gamecube");
+        assert!(!drive.join("Roms/Wii").exists());
+        assert!(!drive.join("Roms/GameCube").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn relocates_existing_ssd_dolphin_games_without_recopying_them() {
+        let root = std::env::temp_dir().join(format!("conduit-dolphin-migrate-test-{}", uuid::Uuid::new_v4()));
+        let roms = root.join("local/Roms");
+        let packages = root.join("local/PS4");
+        let drive = root.join("drive");
+        fs::create_dir_all(roms.join("Wii")).unwrap();
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(drive.join("Roms/Wii")).unwrap();
+        fs::write(roms.join("Wii/Galaxy.nkit.iso"), b"wii").unwrap();
+        fs::write(drive.join("Roms/Wii/Galaxy.nkit.iso"), b"wii").unwrap();
+
+        let announced = AtomicBool::new(false);
+        let announce = |plan: &TransferPlan| {
+            assert_eq!(plan.bytes, 0);
+            assert_eq!(plan.rom_files, 0);
+            assert_eq!(plan.relocated_rom_files, 1);
+            announced.store(true, Ordering::Relaxed);
+        };
+        let summary = sync_library(
+            &roms,
+            &packages,
+            &drive,
+            &AtomicBool::new(false),
+            Some(&announce),
+        )
+        .unwrap();
+
+        assert!(announced.load(Ordering::Relaxed));
+        assert_eq!(summary.relocated_rom_files, 1);
+        assert!(drive.join("Roms/Dolphin/Galaxy.nkit.iso").is_file());
+        assert!(!drive.join("Roms/Wii").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

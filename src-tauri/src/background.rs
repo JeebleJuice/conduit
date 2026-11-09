@@ -506,13 +506,24 @@ fn run_with_retries(
         let progress_notification = |event| {
             if let Some(app) = app {
                 let (title, body) = match event {
-                    engine::ProgressEvent::RemovableTransfer { bytes } => (
-                        "PS4USB transfer started",
-                        format!(
-                            "Conduit found {} not yet present on the SSD and started transferring it. Existing matching files are excluded.",
-                            format_bytes(bytes)
-                        ),
-                    ),
+                    engine::ProgressEvent::RemovableTransfer {
+                        bytes,
+                        rom_files,
+                        relocated_rom_files,
+                        packages,
+                    } => {
+                        let copy_detail = if bytes > 0 {
+                            format!("{} to copy", format_bytes(bytes))
+                        } else {
+                            "no new file data to copy".into()
+                        };
+                        (
+                            "PS4USB update started",
+                            format!(
+                                "Conduit is working: {rom_files} new ROM file(s), {relocated_rom_files} existing Dolphin file(s) to reorganize, and {packages} PS4 package(s); {copy_detail}."
+                            ),
+                        )
+                    }
                     engine::ProgressEvent::ArchiveExtraction { source, destination } => {
                         let name = Path::new(&source).file_name().unwrap_or_default().to_string_lossy();
                         (

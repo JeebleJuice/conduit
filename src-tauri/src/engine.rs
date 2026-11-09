@@ -13,7 +13,7 @@ use std::{
 use uuid::Uuid;
 
 pub(crate) enum ProgressEvent {
-    RemovableTransfer { bytes: u64 },
+    RemovableTransfer { bytes: u64, rom_files: usize, relocated_rom_files: usize, packages: usize },
     ArchiveExtraction { source: String, destination: String },
 }
 
@@ -499,18 +499,25 @@ fn perform_operations(
                 }
                 let packages = string_config(node, "packagesSource").ok_or("Removable-library sync needs a PS4 package source")?;
                 let packages = expand_home(&packages)?;
-                let announce = |bytes| {
+                let announce = |plan: &removable::TransferPlan| {
                     if let Some(notify) = on_progress {
-                        notify(ProgressEvent::RemovableTransfer { bytes });
+                        notify(ProgressEvent::RemovableTransfer {
+                            bytes: plan.bytes,
+                            rom_files: plan.rom_files,
+                            relocated_rom_files: plan.relocated_rom_files,
+                            packages: plan.packages,
+                        });
                     }
                 };
                 let summary = removable::sync_library(source, &packages, destination, cancelled, Some(&announce))?;
                 context = format!(
-                    "Copied or updated {} ROM game{} ({} file{}), left {} already-current game{} unchanged, and moved {} PS4 package{}.",
+                    "Copied or updated {} ROM game{} ({} copied file{}, {} existing Dolphin file{} reorganized), left {} already-current game{} unchanged, and moved {} PS4 package{}.",
                     summary.updated_rom_items,
                     if summary.updated_rom_items == 1 { "" } else { "s" },
                     summary.copied_rom_files,
                     if summary.copied_rom_files == 1 { "" } else { "s" },
+                    summary.relocated_rom_files,
+                    if summary.relocated_rom_files == 1 { "" } else { "s" },
                     summary.unchanged_rom_items,
                     if summary.unchanged_rom_items == 1 { "" } else { "s" },
                     summary.moved_packages,
