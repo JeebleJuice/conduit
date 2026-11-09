@@ -510,6 +510,7 @@ fn run_with_retries(
                         bytes,
                         rom_files,
                         relocated_rom_files,
+                        cover_files,
                         packages,
                     } => {
                         let copy_detail = if bytes > 0 {
@@ -520,7 +521,7 @@ fn run_with_retries(
                         (
                             "PS4USB update started",
                             format!(
-                                "Conduit is working: {rom_files} new ROM file(s), {relocated_rom_files} existing Dolphin file(s) to reorganize, and {packages} PS4 package(s); {copy_detail}."
+                                "Conduit is working: {rom_files} new or changed ROM file(s), {relocated_rom_files} existing Dolphin file(s) to reorganize, {cover_files} homebrew cover file(s), and {packages} PS4 package(s); {copy_detail}."
                             ),
                         )
                     }

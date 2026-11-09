@@ -16,6 +16,7 @@ pub(crate) fn ps4usb_workflow() -> Workflow {
         permissions: vec![
             "~/Programs/Roms".into(),
             "~/Programs/PS4".into(),
+            "~/Programs/Homebrew Covers".into(),
             "/run/media/jeeblejuice/PS4USB".into(),
         ],
         nodes: vec![
@@ -40,6 +41,10 @@ pub(crate) fn ps4usb_workflow() -> Workflow {
                     config: HashMap::from([
                         ("source".into(), serde_json::Value::String("~/Programs/Roms".into())),
                         ("packagesSource".into(), serde_json::Value::String("~/Programs/PS4".into())),
+                        (
+                            "coversSource".into(),
+                            serde_json::Value::String("~/Programs/Homebrew Covers".into()),
+                        ),
                         ("destination".into(), serde_json::Value::String("/run/media/jeeblejuice/PS4USB".into())),
                     ]),
                 },
@@ -72,6 +77,7 @@ pub(crate) struct SyncSummary {
     pub copied_rom_files: usize,
     pub relocated_rom_files: usize,
     pub skipped_rom_files: usize,
+    pub copied_cover_files: usize,
     pub moved_packages: usize,
 }
 
@@ -79,6 +85,7 @@ pub(crate) struct TransferPlan {
     pub bytes: u64,
     pub rom_files: usize,
     pub relocated_rom_files: usize,
+    pub cover_files: usize,
     pub packages: usize,
 }
 
@@ -91,6 +98,7 @@ struct RomTransferPlan {
 pub(crate) fn sync_library(
     roms_source: &Path,
     packages_source: &Path,
+    covers_source: Option<&Path>,
     destination_root: &Path,
     cancelled: &AtomicBool,
     on_transfer_started: Option<&dyn Fn(&TransferPlan)>,
@@ -101,9 +109,16 @@ pub(crate) fn sync_library(
     if !packages_source.is_dir() {
         return Err(format!("PS4 package source is unavailable: {}", packages_source.display()));
     }
+    if let Some(source) = covers_source.filter(|source| !source.is_dir()) {
+        return Err(format!("Homebrew cover source is unavailable: {}", source.display()));
+    }
     verify_writable(destination_root)?;
 
     let rom_files = recursive_files(roms_source)?;
+    let cover_files = match covers_source {
+        Some(source) => recursive_files(source)?,
+        None => Vec::new(),
+    };
     let mut packages: Vec<PathBuf> = fs::read_dir(packages_source)
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
@@ -116,9 +131,16 @@ pub(crate) fn sync_library(
     packages.sort();
 
     let roms_destination = destination_root.join("Roms");
-    let rom_plan = required_rom_space(roms_source, &roms_destination, &rom_files)?;
+    let covers_destination = destination_root.join("Homebrew Covers");
+    let rom_plan = required_rom_space(roms_source, &roms_destination, &rom_files, cancelled)?;
+    let (cover_bytes, cover_copies) = required_changed_space(
+        covers_source,
+        &covers_destination,
+        &cover_files,
+        cancelled,
+    )?;
     let package_bytes = required_space(packages_source, destination_root, &packages)?;
-    let required = rom_plan.bytes.saturating_add(package_bytes);
+    let required = rom_plan.bytes.saturating_add(cover_bytes).saturating_add(package_bytes);
     if let Some(available) = available_space(destination_root) {
         if required > available {
             return Err(format!(
@@ -129,12 +151,13 @@ pub(crate) fn sync_library(
             ));
         }
     }
-    if rom_plan.copies + rom_plan.relocations + packages.len() > 0 {
+    if rom_plan.copies + rom_plan.relocations + cover_copies + packages.len() > 0 {
         if let Some(notify) = on_transfer_started {
             notify(&TransferPlan {
                 bytes: required,
                 rom_files: rom_plan.copies,
                 relocated_rom_files: rom_plan.relocations,
+                cover_files: cover_copies,
                 packages: packages.len(),
             });
         }
@@ -146,6 +169,7 @@ pub(crate) fn sync_library(
         copied_rom_files: 0,
         relocated_rom_files: 0,
         skipped_rom_files: 0,
+        copied_cover_files: 0,
         moved_packages: 0,
     };
     let mut all_rom_items = HashSet::new();
@@ -157,8 +181,13 @@ pub(crate) fn sync_library(
         all_rom_items.insert(item.clone());
         let destination = roms_destination.join(ssd_rom_relative(relative));
         if destination.exists() {
-            ensure_matching_size(&source, &destination)?;
-            summary.skipped_rom_files += 1;
+            if rom_file_is_current(&source, &destination, cancelled)? {
+                summary.skipped_rom_files += 1;
+                continue;
+            }
+            copy_atomic(&source, &destination, cancelled)?;
+            summary.copied_rom_files += 1;
+            updated_rom_items.insert(item);
             continue;
         }
         if let Some(legacy) = legacy_ssd_rom_path(&roms_destination, relative).filter(|path| path.exists()) {
@@ -178,6 +207,19 @@ pub(crate) fn sync_library(
     }
     summary.updated_rom_items = updated_rom_items.len();
     summary.unchanged_rom_items = all_rom_items.difference(&updated_rom_items).count();
+
+    if let Some(source_root) = covers_source {
+        for source in cover_files {
+            ensure_running(cancelled)?;
+            let relative = source.strip_prefix(source_root).map_err(|error| error.to_string())?;
+            let destination = covers_destination.join(relative);
+            if destination.exists() && files_match(&source, &destination, cancelled)? {
+                continue;
+            }
+            copy_atomic(&source, &destination, cancelled)?;
+            summary.copied_cover_files += 1;
+        }
+    }
 
     for source in packages {
         ensure_running(cancelled)?;
@@ -268,7 +310,14 @@ fn required_space(source_root: &Path, destination_root: &Path, files: &[PathBuf]
     })
 }
 
-fn required_rom_space(source_root: &Path, destination_root: &Path, files: &[PathBuf]) -> Result<RomTransferPlan, String> {
+const SMALL_ROM_FILE_LIMIT: u64 = 16 * 1024 * 1024;
+
+fn required_rom_space(
+    source_root: &Path,
+    destination_root: &Path,
+    files: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<RomTransferPlan, String> {
     let mut plan = RomTransferPlan { bytes: 0, copies: 0, relocations: 0 };
     let mut destinations = HashMap::new();
     for source in files {
@@ -285,7 +334,10 @@ fn required_rom_space(source_root: &Path, destination_root: &Path, files: &[Path
         }
         let destination = destination_root.join(&mapped);
         if destination.exists() {
-            ensure_matching_size(source, &destination)?;
+            if !rom_file_is_current(source, &destination, cancelled)? {
+                plan.bytes = plan.bytes.saturating_add(source.metadata().map_err(|error| error.to_string())?.len());
+                plan.copies += 1;
+            }
         } else if let Some(legacy) = legacy_ssd_rom_path(destination_root, relative).filter(|path| path.exists()) {
             ensure_matching_size(source, &legacy)?;
             plan.relocations += 1;
@@ -295,6 +347,45 @@ fn required_rom_space(source_root: &Path, destination_root: &Path, files: &[Path
         }
     }
     Ok(plan)
+}
+
+fn required_changed_space(
+    source_root: Option<&Path>,
+    destination_root: &Path,
+    files: &[PathBuf],
+    cancelled: &AtomicBool,
+) -> Result<(u64, usize), String> {
+    let Some(source_root) = source_root else { return Ok((0, 0)) };
+    let mut bytes = 0_u64;
+    let mut copies = 0_usize;
+    for source in files {
+        let relative = source.strip_prefix(source_root).map_err(|error| error.to_string())?;
+        let destination = destination_root.join(relative);
+        if !destination.exists() || !files_match(source, &destination, cancelled)? {
+            bytes = bytes.saturating_add(source.metadata().map_err(|error| error.to_string())?.len());
+            copies += 1;
+        }
+    }
+    Ok((bytes, copies))
+}
+
+fn rom_file_is_current(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<bool, String> {
+    let source_size = source.metadata().map_err(|error| error.to_string())?.len();
+    let destination_size = destination.metadata().map_err(|error| error.to_string())?.len();
+    if source_size != destination_size {
+        return Ok(false);
+    }
+    if source_size <= SMALL_ROM_FILE_LIMIT {
+        files_match(source, destination, cancelled)
+    } else {
+        Ok(true)
+    }
+}
+
+fn files_match(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<bool, String> {
+    let source_size = source.metadata().map_err(|error| error.to_string())?.len();
+    let destination_size = destination.metadata().map_err(|error| error.to_string())?.len();
+    Ok(source_size == destination_size && digest(source, cancelled)? == digest(destination, cancelled)?)
 }
 
 fn ensure_matching_size(source: &Path, destination: &Path) -> Result<(), String> {
@@ -441,6 +532,7 @@ mod tests {
         let summary = sync_library(
             &roms,
             &packages,
+            None,
             &drive,
             &AtomicBool::new(false),
             Some(&announce),
@@ -471,7 +563,7 @@ mod tests {
         fs::write(roms.join("Wii/Galaxy.nkit.iso"), b"wii").unwrap();
         fs::write(roms.join("GameCube/Sunshine.nkit.iso"), b"gamecube").unwrap();
 
-        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
+        let summary = sync_library(&roms, &packages, None, &drive, &AtomicBool::new(false), None).unwrap();
         assert_eq!(summary.copied_rom_files, 2);
         assert_eq!(fs::read(drive.join("Roms/Dolphin/Galaxy.nkit.iso")).unwrap(), b"wii");
         assert_eq!(fs::read(drive.join("Roms/Dolphin/Sunshine.nkit.iso")).unwrap(), b"gamecube");
@@ -502,6 +594,7 @@ mod tests {
         let summary = sync_library(
             &roms,
             &packages,
+            None,
             &drive,
             &AtomicBool::new(false),
             Some(&announce),
@@ -526,7 +619,7 @@ mod tests {
         fs::create_dir_all(drive.join("Roms/SNES")).unwrap();
         fs::write(roms.join("SNES/game.sfc"), b"same").unwrap();
         fs::write(drive.join("Roms/SNES/game.sfc"), b"same").unwrap();
-        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
+        let summary = sync_library(&roms, &packages, None, &drive, &AtomicBool::new(false), None).unwrap();
         assert_eq!(summary.unchanged_rom_items, 1);
         assert_eq!(summary.skipped_rom_files, 1);
         assert!(roms.join("SNES/game.sfc").is_file());
@@ -549,9 +642,60 @@ mod tests {
         fs::write(game.join("content/data.app"), b"content").unwrap();
         fs::write(game.join("meta/meta.xml"), b"meta").unwrap();
 
-        let summary = sync_library(&roms, &packages, &drive, &AtomicBool::new(false), None).unwrap();
+        let summary = sync_library(&roms, &packages, None, &drive, &AtomicBool::new(false), None).unwrap();
         assert_eq!(summary.updated_rom_items, 1);
         assert_eq!(summary.copied_rom_files, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stages_homebrew_covers_outside_the_rom_scanner() {
+        let root = std::env::temp_dir().join(format!("conduit-cover-test-{}", uuid::Uuid::new_v4()));
+        let roms = root.join("local/Roms");
+        let packages = root.join("local/PS4");
+        let covers = root.join("local/Homebrew Covers");
+        let drive = root.join("drive");
+        fs::create_dir_all(&roms).unwrap();
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(covers.join("DolphinPS4")).unwrap();
+        fs::create_dir_all(&drive).unwrap();
+        fs::write(covers.join("DolphinPS4/GMSE01.png"), b"cover").unwrap();
+
+        let summary = sync_library(
+            &roms,
+            &packages,
+            Some(&covers),
+            &drive,
+            &AtomicBool::new(false),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(summary.copied_cover_files, 1);
+        assert_eq!(
+            fs::read(drive.join("Homebrew Covers/DolphinPS4/GMSE01.png")).unwrap(),
+            b"cover"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refreshes_changed_small_rom_metadata_with_the_same_size() {
+        let root = std::env::temp_dir().join(format!("conduit-metadata-test-{}", uuid::Uuid::new_v4()));
+        let roms = root.join("local/Roms");
+        let packages = root.join("local/PS4");
+        let drive = root.join("drive");
+        fs::create_dir_all(roms.join("Wii U/Twilight/meta")).unwrap();
+        fs::create_dir_all(&packages).unwrap();
+        fs::create_dir_all(drive.join("Roms/Wii U/Twilight/meta")).unwrap();
+        fs::write(roms.join("Wii U/Twilight/meta/meta.xml"), b"base00").unwrap();
+        fs::write(drive.join("Roms/Wii U/Twilight/meta/meta.xml"), b"update").unwrap();
+
+        let summary = sync_library(&roms, &packages, None, &drive, &AtomicBool::new(false), None).unwrap();
+
+        assert_eq!(summary.updated_rom_items, 1);
+        assert_eq!(summary.copied_rom_files, 1);
+        assert_eq!(fs::read(drive.join("Roms/Wii U/Twilight/meta/meta.xml")).unwrap(), b"base00");
         fs::remove_dir_all(root).unwrap();
     }
 

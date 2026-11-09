@@ -264,9 +264,36 @@ pub fn run() {
             let db_path = data_dir.join("conduit.sqlite3");
             database::initialize(&db_path).map_err(std::io::Error::other)?;
             let ssd_workflow = removable::ps4usb_workflow();
-            if !database::workflow_exists(&db_path, &ssd_workflow.id).map_err(std::io::Error::other)? {
-                database::approve_preview(&db_path, &ssd_workflow).map_err(std::io::Error::other)?;
-                database::set_enabled(&db_path, &ssd_workflow, true).map_err(std::io::Error::other)?;
+            match database::stored_workflow(&db_path, &ssd_workflow.id).map_err(std::io::Error::other)? {
+                None => {
+                    database::approve_preview(&db_path, &ssd_workflow).map_err(std::io::Error::other)?;
+                    database::set_enabled(&db_path, &ssd_workflow, true).map_err(std::io::Error::other)?;
+                }
+                Some((mut stored, enabled)) => {
+                    let needs_cover_source = stored
+                        .nodes
+                        .iter()
+                        .find(|node| node.data.node_type == "sync_removable_library")
+                        .is_some_and(|node| !node.data.config.contains_key("coversSource"));
+                    if needs_cover_source {
+                        let permission = "~/Programs/Homebrew Covers".to_owned();
+                        if !stored.permissions.contains(&permission) {
+                            stored.permissions.push(permission);
+                        }
+                        if let Some(node) = stored
+                            .nodes
+                            .iter_mut()
+                            .find(|node| node.data.node_type == "sync_removable_library")
+                        {
+                            node.data.config.insert(
+                                "coversSource".into(),
+                                serde_json::Value::String("~/Programs/Homebrew Covers".into()),
+                            );
+                        }
+                        database::approve_preview(&db_path, &stored).map_err(std::io::Error::other)?;
+                        database::set_enabled(&db_path, &stored, enabled).map_err(std::io::Error::other)?;
+                    }
+                }
             }
 
             let health = Arc::new(Mutex::new(WorkerHealth::default()));

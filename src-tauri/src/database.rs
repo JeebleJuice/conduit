@@ -175,11 +175,23 @@ pub(crate) fn sync_workflow(path: &Path, workflow: &Workflow) -> Result<Workflow
     status_for(&connection, &workflow.id)
 }
 
-pub(crate) fn workflow_exists(path: &Path, workflow_id: &str) -> Result<bool, String> {
+pub(crate) fn stored_workflow(path: &Path, workflow_id: &str) -> Result<Option<(Workflow, bool)>, String> {
     let connection = open(path)?;
-    connection
-        .query_row("SELECT EXISTS(SELECT 1 FROM workflows WHERE id=?1)", [workflow_id], |row| row.get(0))
-        .map_err(|error| error.to_string())
+    let stored: Option<(String, bool)> = connection
+        .query_row(
+            "SELECT definition,enabled FROM workflows WHERE id=?1",
+            [workflow_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    stored
+        .map(|(definition, enabled)| {
+            serde_json::from_str(&definition)
+                .map(|workflow| (workflow, enabled))
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
 }
 
 pub(crate) fn approve_preview(path: &Path, workflow: &Workflow) -> Result<(), String> {
