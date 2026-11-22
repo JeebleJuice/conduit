@@ -194,7 +194,18 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
     if document_like {
         let content = bounded_content(source, &extension);
         let has_cv_token = name.split(|character: char| !character.is_alphanumeric()).any(|part| part == "cv");
-        let career_terms = [
+        let career_filename_terms = [
+            "curriculum vitae",
+            "resume",
+            "résumé",
+            "job application",
+            "application",
+            "jobansøgning",
+            "cover letter",
+            "ansøgning til",
+            "ansøgning",
+        ];
+        let career_content_terms = [
             "curriculum vitae",
             "resume",
             "résumé",
@@ -202,7 +213,9 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
             "jobansøgning",
             "cover letter",
             "ansøgning til",
-            "ansøgning",
+            "dear hiring team",
+            "application for the",
+            "applying for the",
         ];
         let finance_terms = [
             "invoice",
@@ -218,31 +231,31 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
         // A descriptive filename is stronger evidence than a passing word in the
         // document body. CVs often describe billing systems and invoices, while
         // invoices can mention applications or employment.
-        if has_cv_token || contains_any(&name, &career_terms) {
+        if has_cv_token || contains_any_term(&name, &career_filename_terms) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Career")));
         }
-        if contains_any(&name, &finance_terms) {
+        if contains_any_term(&name, &finance_terms) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Finance")));
         }
-        if contains_any(&name, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
+        if contains_any_term(&name, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Study")));
         }
-        if contains_any(&name, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
+        if contains_any_term(&name, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Travel")));
         }
 
         // Within document content, prefer a specific career-document marker over
         // incidental business vocabulary such as "invoice" or "faktura".
-        if contains_any(&content, &career_terms) {
+        if contains_any_term(&content, &career_content_terms) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Career")));
         }
-        if contains_any(&content, &finance_terms) {
+        if contains_any_term(&content, &finance_terms) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Finance")));
         }
-        if contains_any(&content, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
+        if contains_any_term(&content, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Study")));
         }
-        if contains_any(&content, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
+        if contains_any_term(&content, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Travel")));
         }
     }
@@ -745,9 +758,22 @@ fn root(node: &WorkflowNode, key: &str, fallback: &str) -> Result<PathBuf, Strin
     Ok(PathBuf::from(raw))
 }
 
-fn contains_any(text: &str, terms: &[&str]) -> bool {
+fn contains_any_term(text: &str, terms: &[&str]) -> bool {
     let lowercase = text.to_lowercase();
-    terms.iter().any(|term| lowercase.contains(term))
+    terms.iter().any(|term| {
+        lowercase.match_indices(term).any(|(start, matched)| {
+            let before_is_boundary = lowercase[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_alphanumeric());
+            let end = start + matched.len();
+            let after_is_boundary = lowercase[end..]
+                .chars()
+                .next()
+                .is_none_or(|character| !character.is_alphanumeric());
+            before_is_boundary && after_is_boundary
+        })
+    })
 }
 
 fn bounded_content(path: &Path, extension: &str) -> String {
@@ -850,6 +876,26 @@ mod tests {
         fs::write(&source, "Cover letter for a developer role that includes invoice automation.").unwrap();
         assert_eq!(destination(&source, &node(&root)).unwrap(), Some(root.join("Documents/Career")));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn english_application_filename_is_career_and_example_is_not_an_exam() {
+        let root = std::env::temp_dir().join(format!("conduit-application-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("Application - Data Engineer IoT Lakehouse - English.txt");
+        fs::write(
+            &source,
+            "Application for the Data Engineer position. The closest example is a research platform.",
+        )
+        .unwrap();
+        assert_eq!(destination(&source, &node(&root)).unwrap(), Some(root.join("Documents/Career")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn study_terms_require_word_boundaries() {
+        assert!(!contains_any_term("The closest example is Market Lab.", &["exam"]));
+        assert!(contains_any_term("Final exam notes", &["exam"]));
     }
 
     #[test]
