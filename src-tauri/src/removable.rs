@@ -132,7 +132,7 @@ pub(crate) fn sync_library(
 
     let roms_destination = destination_root.join("Roms");
     let covers_destination = destination_root.join("Homebrew Covers");
-    let rom_plan = required_rom_space(roms_source, &roms_destination, &rom_files, cancelled)?;
+    let rom_plan = required_rom_space(roms_source, &roms_destination, &rom_files)?;
     let (cover_bytes, cover_copies) = required_changed_space(
         covers_source,
         &covers_destination,
@@ -181,13 +181,8 @@ pub(crate) fn sync_library(
         all_rom_items.insert(item.clone());
         let destination = roms_destination.join(ssd_rom_relative(relative));
         if destination.exists() {
-            if rom_file_is_current(&source, &destination, cancelled)? {
-                summary.skipped_rom_files += 1;
-                continue;
-            }
-            copy_atomic(&source, &destination, cancelled)?;
-            summary.copied_rom_files += 1;
-            updated_rom_items.insert(item);
+            ensure_matching_size(&source, &destination)?;
+            summary.skipped_rom_files += 1;
             continue;
         }
         if let Some(legacy) = legacy_ssd_rom_path(&roms_destination, relative).filter(|path| path.exists()) {
@@ -310,13 +305,10 @@ fn required_space(source_root: &Path, destination_root: &Path, files: &[PathBuf]
     })
 }
 
-const SMALL_ROM_FILE_LIMIT: u64 = 16 * 1024 * 1024;
-
 fn required_rom_space(
     source_root: &Path,
     destination_root: &Path,
     files: &[PathBuf],
-    cancelled: &AtomicBool,
 ) -> Result<RomTransferPlan, String> {
     let mut plan = RomTransferPlan { bytes: 0, copies: 0, relocations: 0 };
     let mut destinations = HashMap::new();
@@ -334,10 +326,7 @@ fn required_rom_space(
         }
         let destination = destination_root.join(&mapped);
         if destination.exists() {
-            if !rom_file_is_current(source, &destination, cancelled)? {
-                plan.bytes = plan.bytes.saturating_add(source.metadata().map_err(|error| error.to_string())?.len());
-                plan.copies += 1;
-            }
+            ensure_matching_size(source, &destination)?;
         } else if let Some(legacy) = legacy_ssd_rom_path(destination_root, relative).filter(|path| path.exists()) {
             ensure_matching_size(source, &legacy)?;
             plan.relocations += 1;
@@ -367,19 +356,6 @@ fn required_changed_space(
         }
     }
     Ok((bytes, copies))
-}
-
-fn rom_file_is_current(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<bool, String> {
-    let source_size = source.metadata().map_err(|error| error.to_string())?.len();
-    let destination_size = destination.metadata().map_err(|error| error.to_string())?.len();
-    if source_size != destination_size {
-        return Ok(false);
-    }
-    if source_size <= SMALL_ROM_FILE_LIMIT {
-        files_match(source, destination, cancelled)
-    } else {
-        Ok(true)
-    }
 }
 
 fn files_match(source: &Path, destination: &Path, cancelled: &AtomicBool) -> Result<bool, String> {
@@ -679,25 +655,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn refreshes_changed_small_rom_metadata_with_the_same_size() {
-        let root = std::env::temp_dir().join(format!("conduit-metadata-test-{}", uuid::Uuid::new_v4()));
-        let roms = root.join("local/Roms");
-        let packages = root.join("local/PS4");
-        let drive = root.join("drive");
-        fs::create_dir_all(roms.join("Wii U/Twilight/meta")).unwrap();
-        fs::create_dir_all(&packages).unwrap();
-        fs::create_dir_all(drive.join("Roms/Wii U/Twilight/meta")).unwrap();
-        fs::write(roms.join("Wii U/Twilight/meta/meta.xml"), b"base00").unwrap();
-        fs::write(drive.join("Roms/Wii U/Twilight/meta/meta.xml"), b"update").unwrap();
-
-        let summary = sync_library(&roms, &packages, None, &drive, &AtomicBool::new(false), None).unwrap();
-
-        assert_eq!(summary.updated_rom_items, 1);
-        assert_eq!(summary.copied_rom_files, 1);
-        assert_eq!(fs::read(drive.join("Roms/Wii U/Twilight/meta/meta.xml")).unwrap(), b"base00");
-        fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn parses_the_insufficient_space_shortfall_for_notifications() {

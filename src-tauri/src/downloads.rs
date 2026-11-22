@@ -192,18 +192,57 @@ pub(crate) fn destination(source: &Path, node: &WorkflowNode) -> Result<Option<P
     ) || mime.as_deref() == Some("application/pdf");
 
     if document_like {
-        let searchable = format!("{name}\n{}", bounded_content(source, &extension));
-        if contains_any(&searchable, &["invoice", "faktura", "receipt", "kvittering", "bank statement", "kontoudtog", "årsopgørelse", "tax statement"]) {
-            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Finance")));
-        }
+        let content = bounded_content(source, &extension);
         let has_cv_token = name.split(|character: char| !character.is_alphanumeric()).any(|part| part == "cv");
-        if has_cv_token || contains_any(&searchable, &["curriculum vitae", "resume", "résumé", "job application", "jobansøgning", "cover letter", "ansøgning til"]) {
+        let career_terms = [
+            "curriculum vitae",
+            "resume",
+            "résumé",
+            "job application",
+            "jobansøgning",
+            "cover letter",
+            "ansøgning til",
+            "ansøgning",
+        ];
+        let finance_terms = [
+            "invoice",
+            "faktura",
+            "receipt",
+            "kvittering",
+            "bank statement",
+            "kontoudtog",
+            "årsopgørelse",
+            "tax statement",
+        ];
+
+        // A descriptive filename is stronger evidence than a passing word in the
+        // document body. CVs often describe billing systems and invoices, while
+        // invoices can mention applications or employment.
+        if has_cv_token || contains_any(&name, &career_terms) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Career")));
         }
-        if contains_any(&searchable, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
+        if contains_any(&name, &finance_terms) {
+            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Finance")));
+        }
+        if contains_any(&name, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Study")));
         }
-        if contains_any(&searchable, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
+        if contains_any(&name, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
+            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Travel")));
+        }
+
+        // Within document content, prefer a specific career-document marker over
+        // incidental business vocabulary such as "invoice" or "faktura".
+        if contains_any(&content, &career_terms) {
+            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Career")));
+        }
+        if contains_any(&content, &finance_terms) {
+            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Finance")));
+        }
+        if contains_any(&content, &["assignment", "lecture notes", "syllabus", "exam", "opgave", "forelæsning", "pensum", "eksamen"]) {
+            return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Study")));
+        }
+        if contains_any(&content, &["boarding pass", "flight booking", "hotel booking", "itinerary", "rejseplan", "flybillet", "hotelreservation"]) {
             return Ok(Some(root(node, "documentsRoot", "~/Documents")?.join("Travel")));
         }
     }
@@ -788,6 +827,28 @@ mod tests {
         let source = root.join("document.txt");
         fs::write(&source, "Invoice 4821 for services").unwrap();
         assert_eq!(destination(&source, &node(&root)).unwrap(), Some(root.join("Documents/Finance")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn career_filename_wins_over_incidental_finance_content() {
+        let root = std::env::temp_dir().join(format!("conduit-career-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        for filename in ["CV - BornFiber.txt", "Ansøgning - BornFiber.txt"] {
+            let source = root.join(filename);
+            fs::write(&source, "Billing events must not create an extra ordre eller faktura.").unwrap();
+            assert_eq!(destination(&source, &node(&root)).unwrap(), Some(root.join("Documents/Career")));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn career_content_wins_over_incidental_finance_content() {
+        let root = std::env::temp_dir().join(format!("conduit-career-content-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("document.txt");
+        fs::write(&source, "Cover letter for a developer role that includes invoice automation.").unwrap();
+        assert_eq!(destination(&source, &node(&root)).unwrap(), Some(root.join("Documents/Career")));
         fs::remove_dir_all(root).unwrap();
     }
 
